@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: mandate
+      POSTGRES_USER: mandate
+      POSTGRES_PASSWORD: mandate
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - mandate-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mandate -d mandate"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  mandate-postgres-data:

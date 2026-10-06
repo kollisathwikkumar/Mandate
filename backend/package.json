@@ -1,0 +1,63 @@
+{
+  "name": "mandate-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "db:migrate": "tsx packages/adapters/src/postgres/migrate-cli.ts",
+    "start:api": "MANDATE_SERVICE_NAME=mandate-api node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file=.env.local --import tsx --import ./packages/observability/src/register.ts apps/api/src/server.ts",
+    "dev:api": "MANDATE_SERVICE_NAME=mandate-api node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file-if-exists=.env.local --import tsx --import ./packages/observability/src/register.ts apps/api/src/server.ts",
+    "start:worker": "MANDATE_SERVICE_NAME=mandate-worker node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file=.env.local --import tsx --import ./packages/observability/src/register.ts apps/worker/src/server.ts",
+    "dev:worker": "MANDATE_SERVICE_NAME=mandate-worker node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file-if-exists=.env.local --import tsx --import ./packages/observability/src/register.ts apps/worker/src/server.ts",
+    "start:indexer": "MANDATE_SERVICE_NAME=mandate-indexer node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file=.env.local --import tsx --import ./packages/observability/src/register.ts apps/chain-indexer/src/server.ts",
+    "dev:indexer": "MANDATE_SERVICE_NAME=mandate-indexer node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file-if-exists=.env.local --import tsx --import ./packages/observability/src/register.ts apps/chain-indexer/src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "test:contracts": "vitest run --config vitest.integration.config.ts packages/chain/test/safe-enforcement.integration.test.ts",
+    "start:mcp": "MANDATE_SERVICE_NAME=mandate-mcp node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file=.env.local --import tsx --import ./packages/observability/src/register.ts apps/mcp-server/src/main.ts",
+    "dev:mcp": "MANDATE_SERVICE_NAME=mandate-mcp node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file-if-exists=.env.local --import tsx --import ./packages/observability/src/register.ts apps/mcp-server/src/main.ts",
+    "start:mcp:http": "MANDATE_SERVICE_NAME=mandate-mcp-http node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file=.env.local --import tsx --import ./packages/observability/src/register.ts apps/mcp-server/src/hosted-main.ts",
+    "dev:mcp:http": "MANDATE_SERVICE_NAME=mandate-mcp-http node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --env-file-if-exists=.env.local --import tsx --import ./packages/observability/src/register.ts apps/mcp-server/src/hosted-main.ts",
+    "mandate": "tsx apps/cli/src/main.ts",
+    "mandate:built": "node dist/apps/cli/src/main.js",
+    "audit-anchor:verify": "tsx apps/cli/src/audit-anchor-verify.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1146.0",
+    "@aws-sdk/client-secrets-manager": "^3.1146.0",
+    "@aws-sdk/client-sesv2": "^3.1146.0",
+    "@fastify/otel": "^0.21.1",
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.222.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/instrumentation-http": "^0.222.0",
+    "@opentelemetry/instrumentation-pg": "^0.74.0",
+    "@opentelemetry/sdk-node": "^0.222.0",
+    "ethers": "6.17.0",
+    "fastify": "^5.12.5",
+    "jose": "^6.2.12",
+    "pg": "^8.16.3",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@foundry-rs/anvil": "1.7.1",
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@safe-global/safe-smart-account": "1.5.0",
+    "@types/node": "^24.10.0",
+    "@types/pg": "^8.15.5",
+    "@vitest/coverage-v8": "^5.0.3",
+    "solc": "0.8.36",
+    "tsx": "^4.20.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "overrides": {
+    "tmp": "0.2.7"
+  }
+}

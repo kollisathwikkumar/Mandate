@@ -9,6 +9,24 @@ const actionValue = {
   amount: '1', nonce: 0, nonceEpoch: 0, expiresAt: 1_900_000_000,
 };
 
+const baseApi: CliApi = {
+  async listAgents() { return null; }, async createAgent() { return null; }, async listPolicies() { return null; },
+  async simulateAction() { return null; }, async requestAction() { return null; }, async getAction() { return null; },
+  async getReceipts() { return null; }, async getAuditEvents() { return null; }, async getAlerts() { return null; },
+  async listModelProviderCredentials() { return null; }, async setModelProviderCredential() { return null; },
+  async deleteModelProviderCredential() { return null; }, async testModelProviderCredential() { return null; },
+  async disableModelProviderCredential() { return null; }, async createOrganization() { return null; }, async acceptInvitation() { return null; },
+  async createPolicyDraft() { return null; }, async createPolicyRevision() { return null; }, async approveAction() { return null; },
+  async getSignedAuditExport() { return null; }, async listAccounts() { return null; }, async registerAccount() { return null; },
+  async verifyAccount() { return null; }, async listMembers() { return null; }, async setMemberRole() { return null; },
+  async removeMember() { return null; }, async listInvitations() { return null; }, async createInvitation() { return null; },
+  async revokeInvitation() { return null; }, async preparePolicyActivation() { return null; }, async finalizePolicyActivation() { return null; },
+  async preparePolicyRevocation() { return null; }, async finalizePolicyRevocation() { return null; }, async authorizeAction() { return null; },
+  async executeAction() { return null; }, async resolveDeepReorg() { return null; }, async listWebhookEndpoints() { return null; },
+  async createWebhookEndpoint() { return null; }, async setWebhookEndpointEnabled() { return null; }, async deleteWebhookEndpoint() { return null; },
+  async rotateWebhookSigningSecret() { return null; }, async listWebhookDeliveries() { return null; },
+};
+
 describe('Mandate CLI command layer', () => {
   it('parses only explicit supported command shapes', () => {
     expect(parseCliCommand(['actions', 'simulate', '@action.json'])).toEqual({ kind: 'action-simulate', input: '@action.json' });
@@ -28,6 +46,54 @@ describe('Mandate CLI command layer', () => {
       kind: 'action-execute', actionId: 'action-1', signatureInput: '@sig.txt', transactionInput: '@raw-tx.txt',
     });
     expect(parseCliCommand(['audit', 'export', '250', '175'])).toEqual({ kind: 'audit-export', limit: 250, beforeSequence: '175' });
+    expect(() => parseCliCommand(['actions', 'execute', 'action-1', '0xsignature', '@raw.txt'])).toThrow('sensitive input');
+    expect(() => parseCliCommand(['webhooks', 'deliveries', 'endpoint-1', '101'])).toThrow('between 1 and 100');
+  });
+
+  it('validates JSON inputs and dispatches CLI commands through SDK operations', async () => {
+    const calls: string[] = [];
+    const api: CliApi = {
+      ...baseApi,
+      async createPolicyDraft(revision, idempotencyKey) { calls.push(`policy:${revision.policyId}:${idempotencyKey}`); return { created: true }; },
+      async registerAccount(account, idempotencyKey) { calls.push(`account:${account.id}:${idempotencyKey}`); return { registered: true }; },
+      async createWebhookEndpoint(url, eventTypes, idempotencyKey) { calls.push(`webhook:${url}:${eventTypes[0]}:${idempotencyKey}`); return { created: true }; },
+      async executeAction(actionId, signature, rawTransaction, idempotencyKey) {
+        calls.push(`execute:${actionId}:${signature}:${rawTransaction}:${idempotencyKey}`); return { submitted: true };
+      },
+      async getSignedAuditExport(limit, beforeSequence) { calls.push(`export:${limit}:${beforeSequence}`); return { events: [] }; },
+    };
+    const policy = {
+      schemaVersion: 1, policyId: 'policy-1', revision: 1, organizationId: 'org-1',
+      owner: `0x${'1'.repeat(40)}`, account: `0x${'2'.repeat(40)}`, agentId: 'agent-1',
+      agentAddress: `0x${'3'.repeat(40)}`, agentKeyVersion: 1, chainId: 10143, adapter: 'evm-smart-account',
+      target: `0x${'4'.repeat(40)}`, selectors: ['0x12345678'], asset: `0x${'5'.repeat(40)}`,
+      recipients: [`0x${'6'.repeat(40)}`], limits: { perAction: '1', cumulative: '10', windowSeconds: 60 },
+      validAfter: 1_700_000_000, expiresAt: 1_800_000_000, nonceEpoch: 0,
+    };
+    const inputs: Record<string, object> = {
+      '@policy.json': policy,
+      '@account.json': { id: 'account-1', chainId: 10143, address: `0x${'7'.repeat(40)}`, adapter: 'evm-smart-account' },
+      '@webhook.json': { url: 'https://hooks.example.com/mandate', eventTypes: ['ACTION_RESERVED'] },
+    };
+    const readJson = async (reference: string) => inputs[reference] as import('../../../packages/sdk/src/client.js').JsonValue;
+    const readSecret = async (reference: string) => reference === '@signature' ? `0x${'ab'.repeat(65)}` : `0x${'cd'.repeat(32)}`;
+    for (const args of [
+      ['policies', 'create', '@policy.json'],
+      ['accounts', 'register', '@account.json'],
+      ['webhooks', 'create', '@webhook.json'],
+      ['actions', 'execute', 'action-1', '@signature', '@transaction'],
+      ['audit', 'export', '250', '175'],
+    ]) {
+      await executeCliCommand(parseCliCommand(args), api, async () => parseActionInput(actionValue), readSecret, readJson);
+    }
+    expect(calls.map((call) => call.split(':').slice(0, 3).join(':'))).toEqual([
+      expect.stringMatching(/^policy:policy-1:/),
+      expect.stringMatching(/^account:account-1:/),
+      expect.stringMatching(/^webhook:https:/),
+      expect.stringMatching(/^execute:action-1:/),
+      'export:250:175',
+    ]);
+    expect(calls[3]).toContain(`:${`0x${'ab'.repeat(65)}`}:0x${'cd'.repeat(32)}:`);
   });
 
   it('parses model-provider key commands using file or stdin references, not literal keys', () => {
@@ -41,6 +107,7 @@ describe('Mandate CLI command layer', () => {
   it('dispatches model-provider key input without returning or logging the raw key', async () => {
     const observed: string[] = [];
     const api: CliApi = {
+      ...baseApi,
       async listAgents() { return { agents: [] }; },
       async createAgent() { return { created: true }; },
       async listPolicies() { return { policies: [] }; },
@@ -74,6 +141,7 @@ describe('Mandate CLI command layer', () => {
     });
     const calls: string[] = [];
     const api: CliApi = {
+      ...baseApi,
       async listAgents() { return { agents: [] }; }, async createAgent() { return { created: true }; },
       async listPolicies() { return { policies: [] }; }, async simulateAction() { return { verdict: 'ALLOW' }; },
       async requestAction() { return { state: 'RESERVED' }; }, async getAction() { return null; },
@@ -101,6 +169,7 @@ describe('Mandate CLI command layer', () => {
   it('dispatches simulation through the SDK without local policy evaluation', async () => {
     let simulatedActionId = '';
     const api: CliApi = {
+      ...baseApi,
       async listAgents() { return { agents: [] }; },
       async createAgent() { return { created: true }; },
       async listPolicies() { return { policies: [] }; },

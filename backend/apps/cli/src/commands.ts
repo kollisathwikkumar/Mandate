@@ -238,12 +238,12 @@ export function parseCliCommand(args: readonly string[]): CliCommand {
 }
 
 function jsonReference(value: string): string {
-  if (value !== '-' && !/^@[^ \s]+$/.test(value)) throw new Error('Use @file or - to read JSON input');
+  if (value !== '-' && !/^@[^\u0000\s]+$/.test(value)) throw new Error('Use @file or - to read JSON input');
   return value;
 }
 
 function secretReference(value: string): string {
-  if (value !== '-' && !/^@[^ \s]+$/.test(value)) throw new Error('Use @file or - to read sensitive input; do not pass it as a literal command-line argument');
+  if (value !== '-' && !/^@[^\u0000\s]+$/.test(value)) throw new Error('Use @file or - to read sensitive input; do not pass it as a literal command-line argument');
   return value;
 }
 
@@ -263,6 +263,7 @@ export async function executeCliCommand(
   api: CliApi,
   readAction: (reference: string) => Promise<ActionIntent>,
   readSecret: (reference: string) => Promise<string> = async () => { throw new Error('Provider-key input reader is not configured'); },
+  readJson: (reference: string) => Promise<JsonValue> = async () => { throw new Error('JSON input reader is not configured'); },
 ): Promise<JsonValue | null> {
   switch (command.kind) {
     case 'help': return { usage: CLI_USAGE };
@@ -290,5 +291,50 @@ export async function executeCliCommand(
       if (!/^[A-Za-z0-9_-]{40,128}$/.test(token)) throw new Error('Invitation token input is invalid');
       return api.acceptInvitation(token);
     }
+    case 'policy-create': return api.createPolicyDraft(PolicyRevisionSchema.parse(await readJson(command.input)), randomUUID());
+    case 'policy-revise': return api.createPolicyRevision(command.policyId, PolicyRevisionSchema.parse(await readJson(command.input)), randomUUID());
+    case 'action-approve': return api.approveAction(command.actionId, command.outcome, command.actionHash, randomUUID());
+    case 'action-authorize': return api.authorizeAction(command.actionId, randomUUID());
+    case 'action-execute': {
+      const signature = (await readSecret(command.signatureInput)).trim();
+      const rawTransaction = (await readSecret(command.transactionInput)).trim();
+      return api.executeAction(command.actionId, signature, rawTransaction, randomUUID());
+    }
+    case 'action-resolve-reorg': {
+      const body = z.object({
+        disposition: z.enum(['CONSUMED', 'RELEASED']), reason: z.string().min(1).max(1000),
+        evidenceHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional(),
+      }).strict().parse(await readJson(command.input));
+      return api.resolveDeepReorg(command.actionId, body.disposition, body.reason, randomUUID(), body.evidenceHash);
+    }
+    case 'audit-export': return api.getSignedAuditExport(command.limit, command.beforeSequence);
+    case 'account-list': return api.listAccounts();
+    case 'account-register': return api.registerAccount(AccountCreateSchema.parse(await readJson(command.input)), randomUUID());
+    case 'account-verify': return api.verifyAccount(command.accountId, randomUUID());
+    case 'member-list': return api.listMembers();
+    case 'member-set-role': return api.setMemberRole(command.subject, command.role, randomUUID());
+    case 'member-remove': return api.removeMember(command.subject, randomUUID());
+    case 'invitation-list': return api.listInvitations();
+    case 'invitation-create': return api.createInvitation(command.email, command.role, randomUUID());
+    case 'invitation-revoke': return api.revokeInvitation(command.invitationId, randomUUID());
+    case 'policy-activate': return api.preparePolicyActivation(command.policyId, randomUUID());
+    case 'policy-activate-finalize': {
+      const body = z.object({ planId: z.string().uuid(), transactionHashes: z.array(z.string().regex(/^0x[0-9a-fA-F]{64}$/)).min(1).max(32) }).strict().parse(await readJson(command.input));
+      return api.finalizePolicyActivation(command.policyId, body.planId, body.transactionHashes, randomUUID());
+    }
+    case 'policy-revoke': return api.preparePolicyRevocation(command.policyId, randomUUID());
+    case 'policy-revoke-finalize': {
+      const body = z.object({ planId: z.string().uuid(), transactionHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/) }).strict().parse(await readJson(command.input));
+      return api.finalizePolicyRevocation(command.policyId, body.planId, body.transactionHash, randomUUID());
+    }
+    case 'webhook-list': return api.listWebhookEndpoints();
+    case 'webhook-create': {
+      const body = z.object({ url: z.string().min(1).max(2048), eventTypes: z.array(z.enum(WEBHOOK_EVENT_TYPES)).min(1).max(30) }).strict().parse(await readJson(command.input));
+      return api.createWebhookEndpoint(body.url, body.eventTypes, randomUUID());
+    }
+    case 'webhook-enable': return api.setWebhookEndpointEnabled(command.endpointId, command.enabled, randomUUID());
+    case 'webhook-delete': return api.deleteWebhookEndpoint(command.endpointId, randomUUID());
+    case 'webhook-rotate-secret': return api.rotateWebhookSigningSecret(command.endpointId, randomUUID());
+    case 'webhook-deliveries': return api.listWebhookDeliveries(command.endpointId, command.limit);
   }
 }

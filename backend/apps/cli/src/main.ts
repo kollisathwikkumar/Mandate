@@ -9,9 +9,12 @@ async function readStdin(): Promise<string> {
 }
 
 async function readAction(reference: string) {
-  const text = await readInput(reference);
-  const parsed = JsonValueSchema.parse(JSON.parse(text));
+  const parsed = await readJson(reference);
   return parseActionInput(parsed);
+}
+
+async function readJson(reference: string) {
+  return JsonValueSchema.parse(JSON.parse(await readInput(reference)));
 }
 
 async function readInput(reference: string): Promise<string> {
@@ -36,7 +39,7 @@ async function main(args: readonly string[], environment: NodeJS.ProcessEnv): Pr
   if (apiUrl === undefined || token === undefined) throw new Error('MANDATE_API_URL and MANDATE_API_TOKEN are required');
   const organizationId = environment.MANDATE_ORGANIZATION_ID;
   const client = await MandateClient.connect({ apiUrl, token, ...(organizationId === undefined ? {} : { organizationId }) });
-  const result = await executeCliCommand(command, client, readAction, readSecret);
+  const result = await executeCliCommand(command, client, readAction, readSecret, readJson);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 

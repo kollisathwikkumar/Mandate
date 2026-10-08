@@ -47,7 +47,18 @@ describe('Mandate CLI command layer', () => {
     });
     expect(parseCliCommand(['audit', 'export', '250', '175'])).toEqual({ kind: 'audit-export', limit: 250, beforeSequence: '175' });
     expect(() => parseCliCommand(['actions', 'execute', 'action-1', '0xsignature', '@raw.txt'])).toThrow('sensitive input');
+    expect(() => parseCliCommand(['actions', 'execute', 'action-1', '-', '-'])).toThrow('Only one action-execute input may read from stdin');
     expect(() => parseCliCommand(['webhooks', 'deliveries', 'endpoint-1', '101'])).toThrow('between 1 and 100');
+    expect(() => parseCliCommand(['policies', 'create', '{"policy":true}'])).toThrow('Use @file or -');
+    expect(() => parseCliCommand(['audit', 'list', 'not-a-number'])).toThrow('positive integer');
+    expect(() => parseCliCommand(['audit', 'export', '9007199254740992'])).toThrow('between 1 and 10000');
+    expect(() => parseCliCommand(['organizations', 'create', '  '])).toThrow('Organization name');
+    expect(() => parseCliCommand(['invitations', 'accept', 'literal-token'])).toThrow('do not pass it as a literal');
+    expect(() => parseCliCommand(['model-providers', 'test', 'UNSUPPORTED'])).toThrow('Invalid model provider');
+    expect(parseCliCommand(['model-providers', 'delete', 'OPENAI'])).toEqual({ kind: 'model-provider-delete', provider: 'OPENAI' });
+    expect(() => parseCliCommand(['model-providers', 'delete', 'OPENAI', 'extra'])).toThrow('Invalid Mandate CLI command');
+    expect(() => parseCliCommand(['model-providers', 'unknown', 'OPENAI'])).toThrow('Invalid Mandate CLI command');
+    expect(() => parseCliCommand(['model-providers'])).toThrow('Invalid Mandate CLI command');
   });
 
   it('validates JSON inputs and dispatches CLI commands through SDK operations', async () => {
@@ -94,6 +105,63 @@ describe('Mandate CLI command layer', () => {
       'export:250:175',
     ]);
     expect(calls[3]).toContain(`:${`0x${'ab'.repeat(65)}`}:0x${'cd'.repeat(32)}:`);
+  });
+
+  it('executes every supported CLI command through the SDK facade', async () => {
+    const validPolicy = {
+      schemaVersion: 1, policyId: 'policy-1', revision: 1, organizationId: 'org-1',
+      owner: `0x${'1'.repeat(40)}`, account: `0x${'2'.repeat(40)}`, agentId: 'agent-1', agentAddress: `0x${'3'.repeat(40)}`,
+      agentKeyVersion: 1, chainId: 10143, adapter: 'evm-smart-account', target: `0x${'4'.repeat(40)}`,
+      selectors: ['0x12345678'], asset: `0x${'5'.repeat(40)}`, recipients: [`0x${'6'.repeat(40)}`],
+      limits: { perAction: '1', cumulative: '5', windowSeconds: 60 }, validAfter: 1_700_000_000,
+      expiresAt: 1_800_000_000, nonceEpoch: 0,
+    };
+    const jsonInputs: Record<string, object> = {
+      '@policy': validPolicy,
+      '@account': { id: 'acc-1', chainId: 10143, address: `0x${'7'.repeat(40)}`, adapter: 'evm-smart-account' },
+      '@webhook': { url: 'https://hooks.example.com/mandate', eventTypes: ['ACTION_RESERVED'] },
+      '@activate': { planId: '00000000-0000-4000-8000-000000000001', transactionHashes: [`0x${'a'.repeat(64)}`] },
+      '@revoke': { planId: '00000000-0000-4000-8000-000000000001', transactionHash: `0x${'b'.repeat(64)}` },
+      '@resolution': { disposition: 'RELEASED', reason: 'operator reviewed' },
+    };
+    const readJson = async (reference: string) => jsonInputs[reference] as import('../../../packages/sdk/src/client.js').JsonValue;
+    const readSecret = async () => 'provider-secret-material-with-adequate-length';
+    const commands = [
+      ['help'], ['agents', 'list'], ['agents', 'create', 'agent-2', 'Agent Two'], ['policies', 'list'],
+      ['policies', 'create', '@policy'], ['policies', 'revise', 'policy-1', '@policy'], ['policies', 'activate', 'policy-1'],
+      ['policies', 'activate-finalize', 'policy-1', '@activate'], ['policies', 'revoke', 'policy-1'],
+      ['policies', 'revoke-finalize', 'policy-1', '@revoke'], ['actions', 'get', 'action-1'],
+      ['actions', 'simulate', '@action.json'], ['actions', 'request', '@action.json'],
+      ['actions', 'approve', 'action-1', 'APPROVED', `0x${'c'.repeat(64)}`], ['actions', 'authorize', 'action-1'],
+      ['actions', 'execute', 'action-1', '@signature', '@raw'], ['actions', 'resolve-reorg', 'action-1', '@resolution'],
+      ['accounts', 'list'], ['accounts', 'register', '@account'], ['accounts', 'verify', 'account-1'],
+      ['members', 'list'], ['members', 'set-role', 'alice@example.com', 'VIEWER'], ['members', 'remove', 'alice@example.com'],
+      ['invitations', 'list'], ['invitations', 'create', 'alice@example.com', 'VIEWER'],
+      ['invitations', 'revoke', '00000000-0000-4000-8000-000000000001'], ['invitations', 'accept', '@token'],
+      ['receipts', 'list'], ['audit', 'list'], ['audit', 'export'], ['alerts', 'list'],
+      ['receipts', 'list', '25'], ['audit', 'list', '25', '17'], ['alerts', 'list', '25'],
+      ['webhooks', 'list'], ['webhooks', 'create', '@webhook'], ['webhooks', 'enable', '00000000-0000-4000-8000-000000000001'],
+      ['webhooks', 'disable', '00000000-0000-4000-8000-000000000001'], ['webhooks', 'delete', '00000000-0000-4000-8000-000000000001'],
+      ['webhooks', 'rotate-secret', '00000000-0000-4000-8000-000000000001'], ['webhooks', 'deliveries', '00000000-0000-4000-8000-000000000001'],
+      ['model-providers', 'list'], ['model-providers', 'set', 'DEEPSEEK', '@key'], ['model-providers', 'test', 'OPENAI'],
+      ['model-providers', 'disable', 'OPENAI'], ['model-providers', 'delete', 'OPENAI'], ['organizations', 'create', 'Ops', 'Team'],
+    ];
+    for (const args of commands) {
+      const command = parseCliCommand(args);
+      await expect(executeCliCommand(command, baseApi, async () => parseActionInput(actionValue), readSecret, readJson)).resolves.not.toBeUndefined();
+    }
+  });
+
+  it('requires explicit protected readers when commands consume secrets or JSON documents', async () => {
+    const actionReader = async () => parseActionInput(actionValue);
+    await expect(executeCliCommand(parseCliCommand(['actions', 'execute', 'action-1', '@sig', '@tx']), baseApi, actionReader))
+      .rejects.toThrow('Provider-key input reader is not configured');
+    await expect(executeCliCommand(parseCliCommand(['accounts', 'register', '@account.json']), baseApi, actionReader))
+      .rejects.toThrow('JSON input reader is not configured');
+    await expect(executeCliCommand(parseCliCommand(['model-providers', 'set', 'DEEPSEEK', '@key']), baseApi, actionReader, async () => 'short'))
+      .rejects.toThrow('Provider key must contain 16 to 4096 characters');
+    await expect(executeCliCommand(parseCliCommand(['invitations', 'accept', '@token']), baseApi, actionReader, async () => 'invalid-token'))
+      .rejects.toThrow('Invitation token input is invalid');
   });
 
   it('parses model-provider key commands using file or stdin references, not literal keys', () => {

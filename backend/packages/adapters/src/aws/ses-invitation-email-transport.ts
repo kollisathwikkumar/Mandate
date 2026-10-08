@@ -1,7 +1,8 @@
 import { SESv2Client, SendEmailCommand, type SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import type { InvitationEmailMessage, InvitationEmailTransport } from '../../../ports/src/invitation-email.js';
+import { resolveAwsRegion } from './region.js';
 
-const configuredRegion = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
+const configuredRegion = resolveAwsRegion(process.env.AWS_REGION, process.env.AWS_DEFAULT_REGION);
 
 export interface SesEmailApi {
   sendEmail(input: SendEmailCommandInput): Promise<void>;

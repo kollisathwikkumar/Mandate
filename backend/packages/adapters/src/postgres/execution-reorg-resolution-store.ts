@@ -63,6 +63,7 @@ export class ExecutionReorgResolutionStore implements ExecutionReorgResolutionRe
   public async resolveDeepReorg(input: ResolveExecutionReorgInput): Promise<ExecutionReorgResolutionResult> {
     const reason = input.reason.trim();
     const evidenceHash = input.evidenceHash?.toLowerCase() ?? null;
+    // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
     if (reason.length < 1 || reason.length > 1000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(reason)
       || (evidenceHash !== null && !/^0x[0-9a-f]{64}$/.test(evidenceHash))) throw new TypeError('Deep-reorg resolution input is invalid');
     if (input.disposition !== 'CONSUMED' && input.disposition !== 'RELEASED') throw new TypeError('Deep-reorg disposition is invalid');

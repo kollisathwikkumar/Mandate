@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client, type HeadObjectCommandOutput, type PutObjectCommandInput, type PutObjectCommandOutput } from '@aws-sdk/client-s3';
-import { AwsS3ObjectLockApi, S3AuditAnchorStorage, type S3ObjectLockApi } from '../src/aws/s3-audit-anchor-storage.js';
+import { AwsS3ObjectLockApi, resolveS3Region, S3AuditAnchorStorage, type S3ObjectLockApi } from '../src/aws/s3-audit-anchor-storage.js';
 
 class FakeS3ObjectLockApi implements S3ObjectLockApi {
   public putInput: PutObjectCommandInput | null = null;
@@ -22,14 +22,14 @@ class FakeS3ObjectLockApi implements S3ObjectLockApi {
 }
 
 describe('S3AuditAnchorStorage', () => {
-  it('constructs its AWS SDK client with either explicit or default region configuration', () => {
-    const original = process.env.AWS_REGION;
-    process.env.AWS_REGION = 'us-east-1';
+  it('prefers AWS_REGION and falls back to AWS_DEFAULT_REGION like the other AWS adapters', () => {
+    expect(resolveS3Region('us-east-1', 'eu-west-1')).toBe('us-east-1');
+    expect(resolveS3Region(undefined, 'ap-south-1')).toBe('ap-south-1');
+    expect(resolveS3Region('   ', 'ap-south-1')).toBe('ap-south-1');
+    expect(resolveS3Region('  us-east-1  ', 'eu-west-1')).toBe('us-east-1');
+    expect(resolveS3Region(undefined, '  ap-south-1  ')).toBe('ap-south-1');
+    expect(resolveS3Region(undefined, undefined)).toBeUndefined();
     expect(() => new S3AuditAnchorStorage('bucket')).not.toThrow();
-    delete process.env.AWS_REGION;
-    expect(() => new S3AuditAnchorStorage('bucket')).not.toThrow();
-    if (original === undefined) delete process.env.AWS_REGION;
-    else process.env.AWS_REGION = original;
   });
 
   it('uses the default current-time provider when one is not injected', async () => {

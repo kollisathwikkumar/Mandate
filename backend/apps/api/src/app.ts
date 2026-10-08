@@ -3,6 +3,7 @@ import Fastify, { type FastifyError, type FastifyInstance, type FastifyReply, ty
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import type { Pool } from 'pg';
 import { z } from 'zod';
+import { ACTION_STATES } from '../../../packages/domain/src/action-state.js';
 import { createFastifyLoggerOptions } from '../../../packages/observability/src/config.js';
 import { PostgresRateLimitStore } from '../../../packages/adapters/src/postgres/rate-limit-store.js';
 import { AgentApplicationService, ApplicationAccessError } from '../../../packages/application/src/agent-service.js';
@@ -24,8 +25,8 @@ import type { Principal } from '../../../packages/domain/src/principal.js';
 import { AgentConflictError, AgentStore } from '../../../packages/adapters/src/postgres/agent-store.js';
 import { ActionIntentSchema, PolicyRevisionSchema } from '../../../packages/policy/src/schema.js';
 import { openApiDocument } from './openapi.js';
+import { parseCorsAllowedOrigins } from './cors-config.js';
 import { ModelCredentialStore } from '../../../packages/adapters/src/postgres/model-credential-store.js';
-import type { ModelProvider, ModelCredentialState } from '../../../packages/ports/src/model-credential-repository.js';
 import type { ModelProviderTester, ModelSecretStore } from '../../../packages/ports/src/model-secret-store.js';
 import { AwsModelSecretStore } from '../../../packages/adapters/src/aws/secrets-manager.js';
 import { HttpModelProviderTester } from '../../../packages/adapters/src/model-provider-tester.js';
@@ -81,12 +82,15 @@ export interface ApiServerConfig {
   readonly logger?: boolean;
   readonly rateLimit?: { readonly maxRequests: number; readonly windowSeconds: number };
   readonly rateLimitHmacKey?: string;
+  readonly trustedProxyCidrs?: readonly string[];
+  readonly corsAllowedOrigins?: readonly string[];
   readonly modelSecretStore?: ModelSecretStore;
   readonly modelProviderTester?: ModelProviderTester;
   readonly webhookSecretStore?: WebhookSecretStore;
   readonly webhookUrlValidator?: WebhookUrlValidator;
   readonly accountEnrollmentVerifier?: AccountEnrollmentVerifier;
   readonly chainRpcUrls?: Readonly<Record<number, string>>;
+  readonly chainRpcFallbackUrls?: Readonly<Record<number, readonly string[]>>;
   readonly trustedSafeSingletons?: Readonly<Record<number, string>>;
   readonly policyActivationReader?: SafePolicyActivationReader;
   readonly policyActivationFinalizer?: PolicyActivationFinalizer;
@@ -112,6 +116,11 @@ function bearerToken(request: FastifyRequest): string | null {
 function errorBody(code: ApiErrorCode, message: string, requestId: string): { error: { code: ApiErrorCode; message: string; requestId: string } } {
   return { error: { code, message, requestId } };
 }
+
+const transientDependencyCodes = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'ENOTFOUND', 'EAI_AGAIN',
+  '08000', '08001', '08003', '08004', '08006', '08007', '08P01', '53300', '57P03',
+]);
 
 function webhookErrorResponse(error: unknown, request: FastifyRequest, reply: FastifyReply): FastifyReply | null {
   if (error instanceof RepositoryAccessError) {
@@ -258,6 +267,19 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
     throw new Error('JWKS URL must use HTTPS except for loopback development');
   }
   const jwks = createRemoteJWKSet(jwksUrl);
+  const corsAllowedOrigins = config.corsAllowedOrigins === undefined
+    ? undefined
+    : config.corsAllowedOrigins.map((origin) => {
+      const parsedOrigins = parseCorsAllowedOrigins(origin);
+      const [parsedOrigin] = parsedOrigins ?? [];
+      if (parsedOrigins?.length !== 1 || parsedOrigin === undefined) {
+        throw new Error('Each configured CORS origin must be exactly one canonical origin');
+      }
+      return parsedOrigin;
+    });
+  if (corsAllowedOrigins !== undefined && new Set(corsAllowedOrigins).size !== corsAllowedOrigins.length) {
+    throw new Error('CORS origin allowlist contains duplicate origins');
+  }
   const store = new AgentStore(config.pool);
   const service = new AgentApplicationService(store);
   const policyService = new PolicyApplicationService(new PolicyStore(config.pool));
@@ -270,7 +292,7 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
   const actionExecutionService = new ActionExecutionApplicationService(
     actionAuthorizationStore,
     new ActionExecutionSubmissionStore(config.pool),
-    config.actionTransactionSubmitter ?? new EvmActionTransactionSubmitter(config.chainRpcUrls ?? {}),
+    config.actionTransactionSubmitter ?? new EvmActionTransactionSubmitter(config.chainRpcUrls ?? {}, config.chainRpcFallbackUrls ?? {}),
   );
   const approvalService = new ApprovalApplicationService(new ApprovalStore(config.pool));
   const executionReorgResolutionService = new ExecutionReorgResolutionService(new ExecutionReorgResolutionStore(config.pool));
@@ -302,7 +324,11 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
   const organizationInvitationStore = new OrganizationInvitationStore(config.pool, config.invitationTokenCipher);
   const webhookSecretStore = config.webhookSecretStore ?? new AwsWebhookSecretStore();
   const webhookUrlValidator = config.webhookUrlValidator ?? new PublicHttpsWebhookUrlValidator();
-  const app = Fastify({ logger: config.logger === true ? createFastifyLoggerOptions() : config.logger ?? false, bodyLimit: 300_000 });
+  const app = Fastify({
+    logger: config.logger === true ? createFastifyLoggerOptions() : config.logger ?? false,
+    bodyLimit: 300_000,
+    trustProxy: config.trustedProxyCidrs === undefined ? false : [...config.trustedProxyCidrs],
+  });
   const rateLimitStore = new PostgresRateLimitStore(config.pool);
   app.decorateRequest('principal', null);
 
@@ -315,11 +341,46 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
   });
 
   app.addHook('onRequest', async (request, reply) => {
+    if (request.url.startsWith('/api/v1/') && corsAllowedOrigins !== undefined && request.headers.origin !== undefined) {
+      const origin = request.headers.origin;
+      if (!corsAllowedOrigins.includes(origin)) {
+        await reply.code(403).send(errorBody('FORBIDDEN', 'Browser origin is not allowed', request.id));
+        return;
+      }
+      reply.header('vary', 'Origin');
+      reply.header('access-control-allow-origin', origin);
+      reply.header('access-control-expose-headers', 'x-request-id, retry-after, ratelimit-limit, ratelimit-remaining, ratelimit-reset');
+
+      const requestedMethod = request.headers['access-control-request-method'];
+      if (request.method === 'OPTIONS' && typeof requestedMethod === 'string') {
+        const allowedMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+        const requestedHeaders = request.headers['access-control-request-headers'];
+        const allowedHeaders = new Set(['authorization', 'content-type', 'idempotency-key']);
+        const headerNames = typeof requestedHeaders === 'string' && requestedHeaders.length > 0
+          ? requestedHeaders.split(',').map((header) => header.trim().toLowerCase())
+          : [];
+        if (!allowedMethods.includes(requestedMethod.toUpperCase())
+          || headerNames.some((header) => !allowedHeaders.has(header))) {
+          await reply.code(403).send(errorBody('FORBIDDEN', 'Browser preflight requested a method or header that is not allowed', request.id));
+          return;
+        }
+        reply.header('access-control-allow-methods', allowedMethods.join(', '));
+        reply.header('access-control-allow-headers', 'Authorization, Content-Type, Idempotency-Key');
+        reply.header('access-control-max-age', '600');
+        await reply.code(204).send();
+        return;
+      }
+    }
     if (!request.url.startsWith('/api/v1/') || request.routeOptions.url === '/api/v1/openapi.json') return;
     const source = createHmac('sha256', rateLimitHmacSecret).update(`ip:${request.ip}`, 'utf8').digest('hex');
     const maximum = rateLimitMaxRequests;
     const windowSeconds = rateLimitWindowSeconds;
-    const decision = await rateLimitStore.consume(source, maximum, windowSeconds);
+    const decision = await rateLimitStore.consume(source, maximum, windowSeconds).catch(() => null);
+    if (decision === null) {
+      request.log.error({ requestId: request.id, code: 'RATE_LIMIT_STORAGE_UNAVAILABLE' }, 'Shared rate limiter unavailable');
+      await reply.code(503).send(errorBody('DEPENDENCY_UNAVAILABLE', 'Request admission is temporarily unavailable', request.id));
+      return;
+    }
     reply.header('ratelimit-limit', maximum);
     reply.header('ratelimit-remaining', decision.remainingRequests);
     reply.header('ratelimit-reset', decision.retryAfterSeconds);
@@ -351,10 +412,24 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
   });
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
+    if (error.code === 'FST_ERR_CTP_BODY_TOO_LARGE') return reply.code(413).send(errorBody('INVALID_REQUEST', 'Request body exceeds the supported size', request.id));
+    if (error.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') return reply.code(415).send(errorBody('INVALID_REQUEST', 'Request content type is not supported', request.id));
     if (error.validation !== undefined || error.statusCode === 400) {
       return reply.code(400).send(errorBody('INVALID_REQUEST', 'Request data is invalid', request.id));
     }
-    return reply.code(500).send(errorBody('DEPENDENCY_UNAVAILABLE', 'The request could not be completed', request.id));
+    const dependencyCode = typeof error.code === 'string' && transientDependencyCodes.has(error.code) ? error.code : null;
+    const dependencyUnavailable = dependencyCode !== null || error.statusCode === 502 || error.statusCode === 503;
+    request.log.error({
+      requestId: request.id,
+      method: request.method,
+      route: request.routeOptions.url ?? 'unmatched',
+      category: dependencyUnavailable ? 'DEPENDENCY' : 'INTERNAL',
+      failureCode: dependencyCode ?? (error.statusCode === 502 ? 'UPSTREAM_502' : error.statusCode === 503 ? 'UPSTREAM_503' : 'UNEXPECTED'),
+    }, 'Request failed');
+    if (error.statusCode === 502) return reply.code(502).send(errorBody('DEPENDENCY_UNAVAILABLE', 'An upstream service failed', request.id));
+    return dependencyUnavailable
+      ? reply.code(503).send(errorBody('DEPENDENCY_UNAVAILABLE', 'A required service is temporarily unavailable', request.id))
+      : reply.code(500).send(errorBody('INTERNAL_ERROR', 'The request could not be completed', request.id));
   });
 
   app.setNotFoundHandler((request, reply) => reply.code(404).send(errorBody('RESOURCE_NOT_FOUND', 'The requested route was not found', request.id)));
@@ -372,6 +447,7 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
   app.get('/api/v1/openapi.json', async (_request, reply) => reply.code(200).send(openApiDocument));
 
   const providerSchema = z.enum(['DEEPSEEK', 'OPENAI', 'ANTHROPIC', 'OTHER']);
+  // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
   const modelKeySchema = z.string().min(16).max(4096).refine((value) => !/[\u0000-\u001f\u007f]/.test(value), 'API key contains control characters');
   const organizationProviderPath = '/api/v1/orgs/:orgId/integrations/model-providers';
   const authorizeModelAdmin = async (orgId: string, principal: Principal): Promise<number | null> => {
@@ -433,10 +509,12 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
     if (denied !== null) return reply.code(denied).send(errorBody(denied === 404 ? 'RESOURCE_NOT_FOUND' : 'FORBIDDEN', 'Model provider integrations require organization administrator access', request.id));
     const credential = await modelCredentialStore.getCredential(organization.data, provider.data);
     if (credential === null) return reply.code(404).send(errorBody('RESOURCE_NOT_FOUND', 'Model provider credential was not found', request.id));
+    if (credential.state === 'DISABLED') return reply.code(409).send(errorBody('RESOURCE_CONFLICT', 'Disabled credentials must be replaced before testing', request.id));
     const outcome = await modelProviderTester.test(provider.data, await modelSecretStore.get(credential.secretReference));
-    const state: ModelCredentialState = outcome.ok ? 'ACTIVE' : 'ERROR';
-    await modelCredentialStore.markVerified(organization.data, provider.data, state);
-    return reply.code(200).send({ ok: outcome.ok, reason: outcome.reason, credential: await modelCredentialStore.getCredential(organization.data, provider.data).then((record) => record === null ? null : { provider: record.provider, maskedSuffix: record.maskedSuffix, state: record.state, verifiedAt: record.verifiedAt }) });
+    const state = outcome.ok ? 'ACTIVE' : 'ERROR';
+    const record = await modelCredentialStore.markVerified(organization.data, principal.type === 'HUMAN' ? principal.subject : '', provider.data, credential.secretReference, state);
+    if (record === null) return reply.code(409).send(errorBody('RESOURCE_CONFLICT', 'Credential changed while verification was in progress', request.id));
+    return reply.code(200).send({ ok: outcome.ok, reason: outcome.reason, credential: { provider: record.provider, maskedSuffix: record.maskedSuffix, state: record.state, verifiedAt: record.verifiedAt } });
   });
 
   app.post<{ Params: { orgId: string; provider: string } }>(`${organizationProviderPath}/:provider/disable`, async (request, reply) => {
@@ -468,6 +546,7 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
   });
 
   const memberPath = '/api/v1/orgs/:orgId/members';
+  // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
   const memberSubjectSchema = z.string().min(1).max(255).refine((value) => !/[\u0000-\u001f\u007f]/.test(value));
   const memberRoleSchema = z.enum(['OWNER', 'ADMIN', 'APPROVER', 'VIEWER']);
   const authorizeMemberAdmin = async (orgId: string, principal: Principal): Promise<number | null> => {
@@ -511,7 +590,7 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
     if (denied !== null) return reply.code(denied).send(errorBody(denied === 404 ? 'RESOURCE_NOT_FOUND' : 'FORBIDDEN', 'Member management requires organization administrator access', request.id));
     try {
       const input = { organizationId: organization.data, principalId: principal.type === 'HUMAN' ? principal.subject : '', subject: subject.data, idempotencyKey, requestHash: `0x${sha256(JSON.stringify({ subject: subject.data, operation: 'remove' }))}` };
-      const result = await organizationMembershipStore.removeMember(input);
+      await organizationMembershipStore.removeMember(input);
       return reply.code(204).send();
     } catch (error: unknown) { const mapped = mapApplicationError(error, request); if (mapped !== null) return reply.code(mapped.statusCode).send(mapped.body); throw error; }
   });
@@ -537,6 +616,7 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
   };
 
   app.post('/api/v1/orgs', async (request, reply) => {
+    // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
     const body = z.object({ displayName: z.string().trim().min(1).max(160).refine((value) => !/[\u0000-\u001f\u007f]/.test(value)) }).strict().safeParse(request.body);
     const idempotencyKey = readIdempotencyKey(request);
     const principal = request.principal;
@@ -836,6 +916,23 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
     }
   });
 
+  app.get<{ Params: { orgId: string; policyId: string; revision: string } }>('/api/v1/orgs/:orgId/policies/:policyId/revisions/:revision', async (request, reply) => {
+    const principal = request.principal;
+    const organization = OrganizationIdSchema.safeParse(request.params.orgId);
+    const policyId = OrganizationIdSchema.safeParse(request.params.policyId);
+    const revision = z.coerce.number().int().positive().safe().safeParse(request.params.revision);
+    if (!organization.success || !policyId.success || !revision.success) return reply.code(400).send(errorBody('INVALID_REQUEST', 'Policy revision identifiers are invalid', request.id));
+    if (principal === null) return reply.code(401).send(errorBody('UNAUTHENTICATED', 'A valid bearer credential is required', request.id));
+    try {
+      const policy = await policyService.getRevision(principal, organization.data, policyId.data, revision.data);
+      return reply.code(200).send(policy);
+    } catch (error: unknown) {
+      const mapped = mapApplicationError(error, request);
+      if (mapped !== null) return reply.code(mapped.statusCode).send(mapped.body);
+      throw error;
+    }
+  });
+
   app.post<{ Params: { orgId: string } }>('/api/v1/orgs/:orgId/policies', async (request, reply) => {
     const principal = request.principal;
     const organization = OrganizationIdSchema.safeParse(request.params.orgId);
@@ -1098,6 +1195,7 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
     const actionId = OrganizationIdSchema.safeParse(request.params.actionId);
     const body = z.object({
       disposition: z.enum(['CONSUMED', 'RELEASED']),
+      // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
       reason: z.string().trim().min(1).max(1000).refine((value) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)),
       evidenceHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional(),
     }).strict().safeParse(request.body);
@@ -1120,6 +1218,22 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
       return reply.code(kind === 'CREATED' ? 201 : 200).send({
         ...resolution, ...(kind === 'REPLAY' ? { replayed: true } : {}),
       });
+    } catch (error: unknown) {
+      const mapped = mapApplicationError(error, request);
+      if (mapped !== null) return reply.code(mapped.statusCode).send(mapped.body);
+      throw error;
+    }
+  });
+
+  app.get<{ Params: { orgId: string }; Querystring: { state?: string; limit?: string } }>('/api/v1/orgs/:orgId/actions', async (request, reply) => {
+    const principal = request.principal;
+    const organization = OrganizationIdSchema.safeParse(request.params.orgId);
+    const query = z.object({ state: z.enum(ACTION_STATES).optional(), limit: z.coerce.number().int().min(1).max(100).default(50) }).strict().safeParse(request.query);
+    if (!organization.success || !query.success) return reply.code(400).send(errorBody('INVALID_REQUEST', 'Action list filters are invalid', request.id));
+    if (principal === null) return reply.code(401).send(errorBody('UNAUTHENTICATED', 'A valid bearer credential is required', request.id));
+    try {
+      const actions = await activityService.listActions(principal, organization.data, query.data.state ?? null, query.data.limit);
+      return reply.code(200).send({ actions });
     } catch (error: unknown) {
       const mapped = mapApplicationError(error, request);
       if (mapped !== null) return reply.code(mapped.statusCode).send(mapped.body);
@@ -1182,14 +1296,17 @@ export async function createApiServer(config: ApiServerConfig): Promise<FastifyI
     }
   });
 
-  app.get<{ Params: { orgId: string }; Querystring: { limit?: string } }>('/api/v1/orgs/:orgId/receipts', async (request, reply) => {
+  app.get<{ Params: { orgId: string }; Querystring: { limit?: string; actionId?: string } }>('/api/v1/orgs/:orgId/receipts', async (request, reply) => {
     const principal = request.principal;
     const organization = OrganizationIdSchema.safeParse(request.params.orgId);
-    const query = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) }).strict().safeParse(request.query);
+    const query = z.object({
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      actionId: z.string().min(1).max(128).regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/).optional(),
+    }).strict().safeParse(request.query);
     if (!organization.success || !query.success) return reply.code(400).send(errorBody('INVALID_REQUEST', 'Receipt pagination parameters are invalid', request.id));
     if (principal === null) return reply.code(401).send(errorBody('UNAUTHENTICATED', 'A valid bearer credential is required', request.id));
     try {
-      const receipts = await activityService.listReceipts(principal, organization.data, query.data.limit);
+      const receipts = await activityService.listReceipts(principal, organization.data, query.data.limit, query.data.actionId ?? null);
       return reply.code(200).send({ receipts });
     } catch (error: unknown) {
       const mapped = mapApplicationError(error, request);

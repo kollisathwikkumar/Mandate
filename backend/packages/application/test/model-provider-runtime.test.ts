@@ -15,7 +15,7 @@ describe('ModelProviderRuntime', () => {
       getHumanRole: async () => null, listCredentials: async () => [], getCredential,
       writeCredential: async () => { throw new Error('unused'); },
       updateCredentialState: async () => null, deleteCredential: async () => null,
-      markVerified: async () => undefined,
+      markVerified: async () => null,
     };
     const secrets: ModelSecretStore = { put: async () => 'unused', get: getSecret, delete: async () => undefined };
     const runtime = new ModelProviderRuntime(repository, secrets);
@@ -35,7 +35,7 @@ describe('ModelProviderRuntime', () => {
       getHumanRole: async () => null, listCredentials: async () => [], getCredential,
       writeCredential: async () => { throw new Error('unused'); },
       updateCredentialState: async () => null, deleteCredential: async () => null,
-      markVerified: async () => undefined,
+      markVerified: async () => null,
     };
     const secrets: ModelSecretStore = { put: async () => 'unused', get: getSecret, delete: async () => undefined };
     const runtime = new ModelProviderRuntime(repository, secrets);

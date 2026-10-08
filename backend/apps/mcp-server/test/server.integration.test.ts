@@ -12,6 +12,67 @@ afterEach(async () => {
 });
 
 describe('Mandate MCP server', () => {
+  it('does not advertise policy read or simulation authority to an agent principal', async () => {
+    const calls: string[] = [];
+    const api: MandateMcpApi = {
+      context: { organizationId: 'org-1', principalType: 'AGENT' },
+      async listPolicies() { calls.push('list'); return []; },
+      async getPolicy() { calls.push('get'); return null; },
+      async simulateAction() { calls.push('simulate'); return { verdict: 'ALLOW' }; },
+      async requestAction() { calls.push('request'); return { actionId: 'a' }; },
+      async getAction() { return null; },
+      async getReceipt() { return null; },
+    };
+    const server = createMandateMcpServer(api);
+    servers.push(server);
+    const client = new Client({ name: 'mcp-agent-boundary', version: '1.0.0' });
+    clients.push(client);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    for (const [name, args] of [
+      ['mandate_policy_list', {}],
+      ['mandate_policy_get', { policyId: 'policy-1' }],
+    ] as const) {
+      const result = await client.callTool({ name, arguments: args });
+      expect(result.isError).toBe(true);
+      expect(result.content).toMatchObject([{ type: 'text', text: 'HUMAN_PRINCIPAL_REQUIRED' }]);
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it('keeps policy reads available to a human while rejecting human action submission', async () => {
+    const calls: string[] = [];
+    const api: MandateMcpApi = {
+      context: { organizationId: 'org-1', principalType: 'HUMAN' },
+      async listPolicies() { calls.push('list'); return [{ id: 'policy-1' }]; },
+      async getPolicy(id) { calls.push('get'); return { id }; },
+      async simulateAction() { calls.push('simulate'); return { verdict: 'BLOCK' }; },
+      async requestAction() { calls.push('request'); return {}; },
+      async getAction() { return null; },
+      async getReceipt() { return null; },
+    };
+    const server = createMandateMcpServer(api);
+    servers.push(server);
+    const client = new Client({ name: 'mcp-human-boundary', version: '1.0.0' });
+    clients.push(client);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    expect((await client.callTool({ name: 'mandate_policy_list', arguments: {} })).isError).not.toBe(true);
+    expect((await client.callTool({ name: 'mandate_policy_get', arguments: { policyId: 'policy-1' } })).isError).not.toBe(true);
+    const action = {
+      actionId: 'action-1', idempotencyKey: 'mcp-human-idem-1', policyId: 'policy-1', policyRevision: 1,
+      policyRevisionHash: `0x${'a'.repeat(64)}`, account: `0x${'1'.repeat(40)}`,
+      agentId: 'agent-1', agentKeyVersion: 1, chainId: 10143,
+      target: `0x${'2'.repeat(40)}`, selector: '0x12345678', asset: `0x${'3'.repeat(40)}`,
+      recipient: `0x${'4'.repeat(40)}`, amount: '1', nonce: 0, nonceEpoch: 0, expiresAt: 1_900_000_000,
+    };
+    const request = await client.callTool({ name: 'mandate_action_request', arguments: action });
+    expect(request.isError).toBe(true);
+    expect(request.content).toMatchObject([{ type: 'text', text: 'AGENT_PRINCIPAL_REQUIRED' }]);
+    expect(calls).toEqual(['list', 'get']);
+  });
   it('registers tenant-bound tools and exposes list/get/simulate/request/receipt capabilities through MCP', async () => {
     const calls: string[] = [];
     const observed: { simulatedAction: ActionIntent | null } = { simulatedAction: null };
@@ -38,8 +99,8 @@ describe('Mandate MCP server', () => {
     ]);
     expect(listed.tools.find((tool) => tool.name === 'mandate_policy_list')?.inputSchema).not.toHaveProperty('properties.orgId');
     const result = await client.callTool({ name: 'mandate_policy_get', arguments: { policyId: 'policy-1' } });
-    expect(result.content).toMatchObject([{ type: 'text', text: '{"id":"policy-1","state":"ACTIVE"}' }]);
-    expect(calls).toContain('getPolicy:policy-1');
+    expect(result.isError).toBe(true);
+    expect(calls).not.toContain('getPolicy:policy-1');
     const action = {
       actionId: 'action-1', idempotencyKey: 'mcp-action-idem-1', policyId: 'policy-1', policyRevision: 1,
       policyRevisionHash: `0x${'a'.repeat(64)}`, 
@@ -48,8 +109,8 @@ describe('Mandate MCP server', () => {
       recipient: `0x${'4'.repeat(40)}`, amount: '1', nonce: 0, nonceEpoch: 0, expiresAt: 1_900_000_000,
     };
     const simulation = await client.callTool({ name: 'mandate_action_simulate', arguments: action });
-    expect(simulation.content).toMatchObject([{ type: 'text', text: '{"verdict":"ALLOW"}' }]);
-    expect(observed.simulatedAction?.organizationId).toBe('org-1');
+    expect(simulation.isError).toBe(true);
+    expect(observed.simulatedAction).toBeNull();
     const request = await client.callTool({ name: 'mandate_action_request', arguments: action });
     expect(request.content).toMatchObject([{ type: 'text', text: '{"actionId":"action-1","state":"RESERVED"}' }]);
     expect(calls).toContain('requestAction');

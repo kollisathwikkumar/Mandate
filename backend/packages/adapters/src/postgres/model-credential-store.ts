@@ -115,7 +115,22 @@ export class ModelCredentialStore implements ModelCredentialRepository {
     } catch (error: unknown) { await client.query('ROLLBACK'); throw error; } finally { client.release(); }
   }
 
-  public async markVerified(organizationId: string, provider: ModelProvider, state: ModelCredentialState): Promise<void> {
-    await this.pool.query(`UPDATE model_provider_credentials SET verified_at = CASE WHEN $3 = 'ACTIVE' THEN now() ELSE verified_at END, state = $3 WHERE organization_id = $1 AND provider = $2`, [organizationId, provider, state]);
+  public async markVerified(organizationId: string, principalId: string, provider: ModelProvider, secretReference: string, state: 'ACTIVE' | 'ERROR'): Promise<ModelCredentialRecord | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await requireAdministrator(client, organizationId, principalId);
+      // Bind the result to the exact tested secret; disable/rotation wins over stale probes.
+      const result = await client.query<CredentialRow>(
+        `UPDATE model_provider_credentials SET verified_at = CASE WHEN $5 = 'ACTIVE' THEN now() ELSE verified_at END, state = $5
+         WHERE organization_id = $1 AND provider = $2 AND secret_reference = $3 AND state <> $4
+         RETURNING provider, secret_reference, masked_suffix, state, created_at, rotated_at, verified_at, disabled_at`,
+        [organizationId, provider, secretReference, 'DISABLED', state],
+      );
+      await client.query('COMMIT');
+      const row = result.rows[0];
+      return row === undefined ? null : mapRecord(row);
+    } catch (error: unknown) { await client.query('ROLLBACK'); throw error; }
+    finally { client.release(); }
   }
 }

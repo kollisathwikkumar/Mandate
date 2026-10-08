@@ -1,10 +1,10 @@
 import type { Pool } from 'pg';
-import { ActionIntentSchema, type ActionIntent } from '../../../policy/src/schema.js';
+import { ActionIntentSchema } from '../../../policy/src/schema.js';
 import type { ActionState } from '../../../domain/src/action-state.js';
 import { ACTION_STATES } from '../../../domain/src/action-state.js';
 import { POLICY_REASON_CODES, type PolicyReasonCode, type PolicyVerdict } from '../../../domain/src/reason-code.js';
 import type { JsonObject } from '../../../domain/src/json-value.js';
-import type { ActivityRepository, ActionDetailRecord, AlertRecord, AuditEventRecord, ReceiptRecord, ReservationRecord } from '../../../ports/src/activity-repository.js';
+import type { ActivityRepository, ActionDetailRecord, ActionListItem, AlertRecord, AuditEventRecord, ReceiptRecord, ReservationRecord } from '../../../ports/src/activity-repository.js';
 
 interface RoleRow { readonly role: string; }
 interface ActionRow {
@@ -21,6 +21,18 @@ interface ActionRow {
   readonly reservation_state: ReservationRecord['state'] | null;
   readonly reservation_amount: string | null;
   readonly lease_expires_at: Date | null;
+}
+interface ActionListRow {
+  readonly action_id: string;
+  readonly policy_id: string;
+  readonly policy_revision: number;
+  readonly request_hash: string;
+  readonly state: string;
+  readonly verdict: string | null;
+  readonly reason_code: string | null;
+  readonly action_json: JsonObject;
+  readonly created_at: Date;
+  readonly updated_at: Date;
 }
 interface AuditRow {
   readonly sequence: string;
@@ -125,6 +137,31 @@ export class ActivityStore implements ActivityRepository {
     };
   }
 
+  public async listActions(organizationId: string, agentId: string | null, state: ActionState | null, limit: number): Promise<readonly ActionListItem[]> {
+    const result = await this.pool.query<ActionListRow>(
+      `SELECT a.id AS action_id, a.policy_id, a.policy_revision, a.request_hash, a.state, a.verdict, a.reason_code,
+        a.action_json, a.created_at, a.updated_at
+       FROM action_requests a
+       WHERE a.organization_id = $1 AND ($2::text IS NULL OR a.action_json->>'agentId' = $2)
+         AND ($3::text IS NULL OR a.state = $3)
+       ORDER BY a.created_at DESC, a.id DESC LIMIT $4`,
+      [organizationId, agentId, state, limit],
+    );
+    return result.rows.map((row) => {
+      const actionState = ACTION_STATES.find((candidate): candidate is ActionState => candidate === row.state);
+      if (actionState === undefined) throw new Error('Stored action state is invalid');
+      const verdict = row.verdict === null ? null : POLICY_VERDICTS.find((candidate): candidate is PolicyVerdict => candidate === row.verdict) ?? null;
+      if (row.verdict !== null && verdict === null) throw new Error('Stored action verdict is invalid');
+      const reason = row.reason_code === null ? null : POLICY_REASON_CODES.find((candidate): candidate is PolicyReasonCode => candidate === row.reason_code) ?? null;
+      if (row.reason_code !== null && reason === null) throw new Error('Stored action reason code is invalid');
+      return {
+        actionId: row.action_id, policyId: row.policy_id, policyRevision: row.policy_revision,
+        actionHash: row.request_hash.trim(), state: actionState, verdict, reason,
+        action: ActionIntentSchema.parse(row.action_json), createdAt: row.created_at.toISOString(), updatedAt: row.updated_at.toISOString(),
+      };
+    });
+  }
+
   public async listAuditEvents(organizationId: string, agentId: string | null, limit: number, beforeSequence: string | null): Promise<readonly AuditEventRecord[]> {
     const result = await this.pool.query<AuditRow>(
       `SELECT e.sequence::text, e.event_type, e.actor_type, e.actor_id, e.subject_type, e.subject_id, e.correlation_id,
@@ -140,13 +177,14 @@ export class ActivityStore implements ActivityRepository {
     return result.rows.map(mapAudit);
   }
 
-  public async listReceipts(organizationId: string, agentId: string | null, limit: number): Promise<readonly ReceiptRecord[]> {
+  public async listReceipts(organizationId: string, agentId: string | null, limit: number, actionId: string | null = null): Promise<readonly ReceiptRecord[]> {
     const result = await this.pool.query<ReceiptRow>(
       `SELECT r.id::text, r.action_id, r.chain_id::text, r.transaction_hash, r.block_number::text, r.block_hash, r.status, r.receipt_json, r.observed_at
        FROM receipts r JOIN action_requests a ON a.organization_id = r.organization_id AND a.id = r.action_id
        WHERE r.organization_id = $1 AND ($2::text IS NULL OR a.action_json->>'agentId' = $2)
+         AND ($4::text IS NULL OR r.action_id = $4)
        ORDER BY r.observed_at DESC, r.id DESC LIMIT $3`,
-      [organizationId, agentId, limit],
+      [organizationId, agentId, limit, actionId],
     );
     return result.rows.map((row) => {
       const chainId = Number(row.chain_id);

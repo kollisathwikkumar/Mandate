@@ -41,6 +41,12 @@ function result(actionId: string, transactionHash: string): ActionExecutionSubmi
   return { actionId, state: 'SUBMITTED', transactionHash: transactionHash.toLowerCase() };
 }
 
+function eligibleForBroadcast(context: LockedExecutionRow): boolean {
+  return context.action_state === 'AUTHORIZED' && context.authorization_status === 'ACTIVE'
+    && context.authorization_expires_at.getTime() > Date.now() && context.attempt_state === 'AUTHORIZED'
+    && context.attempt_transaction_hash === null && context.eligible;
+}
+
 const lockedContextQuery = `
   SELECT ar.state AS action_state, authz.status AS authorization_status, authz.expires_at AS authorization_expires_at,
          attempt.state AS attempt_state, attempt.transaction_hash AS attempt_transaction_hash,
@@ -109,11 +115,12 @@ async function reserveWithinTransaction(client: PoolClient, input: ActionExecuti
       return conflict('Action or idempotency key already has a different signed transaction', 'IDEMPOTENCY_CONFLICT');
     }
     if (existing.status === 'SUBMITTED') return { kind: 'REPLAY', result: result(input.actionId, existing.transaction_hash.trim()) };
+    if (!eligibleForBroadcast(context)) {
+      return conflict('Action authorization, policy grant, account, reservation, or execution attempt is no longer eligible');
+    }
     return { kind: 'BROADCAST', transactionHash: existing.transaction_hash.trim() };
   }
-  if (context.action_state !== 'AUTHORIZED' || context.authorization_status !== 'ACTIVE'
-    || context.authorization_expires_at.getTime() <= Date.now() || context.attempt_state !== 'AUTHORIZED'
-    || context.attempt_transaction_hash !== null || !context.eligible) {
+  if (!eligibleForBroadcast(context)) {
     return conflict('Action authorization, policy grant, account, reservation, or execution attempt is no longer eligible');
   }
   await client.query(

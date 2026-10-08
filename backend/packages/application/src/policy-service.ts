@@ -14,6 +14,15 @@ export class PolicyApplicationService {
     return this.repository.listPolicies(organizationId);
   }
 
+  public async getRevision(principal: Principal, organizationId: string, policyId: string, revision: number): Promise<PolicyRevision> {
+    if (principal.type !== 'HUMAN') throw new ApplicationAccessError(403, 'FORBIDDEN');
+    const role = await this.repository.getHumanRole(organizationId, principal.subject);
+    if (role === null) throw new ApplicationAccessError(404, 'RESOURCE_NOT_FOUND');
+    const policy = await this.repository.getRevision(organizationId, policyId, revision);
+    if (policy === null) throw new ApplicationAccessError(404, 'RESOURCE_NOT_FOUND');
+    return policy;
+  }
+
   public async simulateAction(
     principal: Principal,
     organizationId: string,

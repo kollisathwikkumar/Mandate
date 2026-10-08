@@ -1,6 +1,8 @@
 import { Pool } from 'pg';
-import { HttpEvmIndexerRpc } from './evm-rpc.js';
+import { FailoverEvmIndexerRpc, HttpEvmIndexerRpc } from './evm-rpc.js';
 import { FinalizedEvmIndexer } from './indexer.js';
+import { parseIndexerRpcFallbackUrls } from './rpc-config.js';
+import { postgresTlsOptions } from '../../../packages/adapters/src/postgres/connection-options.js';
 
 function parseStringMap(value: string | undefined, name: string): Readonly<Record<number, string>> {
   if (value === undefined || value.trim() === '') return {};
@@ -40,6 +42,7 @@ const pollMs = Number(process.env.MANDATE_INDEXER_POLL_MS ?? '3000');
 const confirmations = Number(process.env.MANDATE_INDEXER_CONFIRMATIONS ?? '12');
 const maxBlockRange = Number(process.env.MANDATE_INDEXER_MAX_BLOCK_RANGE ?? '100');
 const rpcUrls = parseStringMap(process.env.MANDATE_EVM_RPC_URLS, 'MANDATE_EVM_RPC_URLS');
+const fallbackUrls = parseIndexerRpcFallbackUrls(process.env.MANDATE_INDEXER_RPC_FALLBACK_URLS, rpcUrls);
 const starts = parseStartBlocks(process.env.MANDATE_INDEXER_START_BLOCKS);
 
 if (databaseUrl === undefined) throw new Error('DATABASE_URL is required');
@@ -51,12 +54,22 @@ for (const chainId of Object.keys(rpcUrls).map(Number)) {
   if (starts[chainId] === undefined) throw new Error(`MANDATE_INDEXER_START_BLOCKS must include chain ${chainId}`);
 }
 
-const pool = new Pool({ connectionString: databaseUrl, max: 5, application_name: 'mandate-chain-indexer' });
-const indexers = Object.entries(rpcUrls).map(([chainId, url]) => new FinalizedEvmIndexer(
-  pool,
-  new HttpEvmIndexerRpc(url),
-  { chainId: Number(chainId), startBlock: starts[Number(chainId)] ?? 1, confirmations, maxBlockRange },
-));
+const pool = new Pool({
+  connectionString: databaseUrl,
+  max: 5,
+  application_name: 'mandate-chain-indexer',
+  ...postgresTlsOptions(databaseUrl, process.env.NODE_ENV, process.env.DATABASE_SSL_CA_PATH),
+});
+const indexers = Object.entries(rpcUrls).map(([chainId, primaryUrl]) => {
+  const numericChainId = Number(chainId);
+  const urls = [primaryUrl, ...(fallbackUrls[numericChainId] ?? [])];
+  const rpc = new FailoverEvmIndexerRpc(urls.map((url) => new HttpEvmIndexerRpc(url)), numericChainId);
+  return new FinalizedEvmIndexer(
+    pool,
+    rpc,
+    { chainId: numericChainId, startBlock: starts[numericChainId] ?? 1, confirmations, maxBlockRange },
+  );
+});
 let stopping = false;
 process.once('SIGINT', () => { stopping = true; });
 process.once('SIGTERM', () => { stopping = true; });

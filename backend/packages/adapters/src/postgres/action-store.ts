@@ -6,8 +6,7 @@ import { POLICY_REASON_CODES, type PolicyDecision, type PolicyReasonCode } from 
 import { RepositoryAccessError } from '../../../ports/src/repository-errors.js';
 import type { ActionRepository, ActionSubmissionInput, ActionSubmissionOutcome, ActionSubmissionResult } from '../../../ports/src/action-repository.js';
 import { evaluateAction, type PolicyState } from '../../../policy/src/evaluate.js';
-import { hashPolicyRevision } from '../../../policy/src/canonical.js';
-import { ActionIntentSchema, PolicyRevisionSchema, type ActionIntent, type PolicyRevision } from '../../../policy/src/schema.js';
+import { ActionIntentSchema, PolicyRevisionSchema, type PolicyRevision } from '../../../policy/src/schema.js';
 
 const ActionSubmissionResultSchema = z.object({
   actionId: z.string(),

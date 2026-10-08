@@ -1,13 +1,14 @@
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { z } from 'zod';
 import { Ed25519AuditExportSigner } from '../../../application/src/audit-export-service.js';
+import { resolveAwsRegion } from './region.js';
 
 const AuditSigningSecretSchema = z.object({
   keyId: z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
   privateKeyPem: z.string().min(1).max(16_384),
 }).strict();
 
-const configuredRegion = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
+const configuredRegion = resolveAwsRegion(process.env.AWS_REGION, process.env.AWS_DEFAULT_REGION);
 
 export class AwsAuditExportKeyStore {
   public constructor(private readonly client = new SecretsManagerClient(

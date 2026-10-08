@@ -12,7 +12,7 @@ import type {
   SavedPolicyActivationPlan,
 } from '../../../ports/src/policy-activation-repository.js';
 import type { SafePolicyActivationPlan } from '../../../chain/src/safe-policy-activation-plan.js';
-import type { FinalizedPolicyActivation, FinalizedSafeTransaction } from '../../../ports/src/policy-activation-finalizer.js';
+import type { FinalizedPolicyActivation } from '../../../ports/src/policy-activation-finalizer.js';
 import { RepositoryAccessError } from '../../../ports/src/repository-errors.js';
 import { PolicyConflictError } from './policy-store.js';
 

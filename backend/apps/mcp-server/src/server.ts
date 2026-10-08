@@ -59,20 +59,22 @@ const errorResult = (error: Error): { content: [{ type: 'text'; text: string }];
 export function createMandateMcpServer(api: MandateMcpApi): McpServer {
   const server = new McpServer({ name: 'mandate', version: '1.0.0' });
   server.registerTool('mandate_policy_list', {
-    title: 'List Mandate policies', description: 'List policies for the authenticated organization context.',
+    title: 'List Mandate policies', description: 'List policies for the authenticated human organization context.',
     inputSchema: emptyInputSchema, annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-  }, async () => serialize(await api.listPolicies()));
+  }, async () => api.context.principalType === 'HUMAN' ? serialize(await api.listPolicies()) : errorResult(new Error('HUMAN_PRINCIPAL_REQUIRED')));
   server.registerTool('mandate_policy_get', {
-    title: 'Get a Mandate policy', description: 'Get one policy from the authenticated organization context.',
+    title: 'Get a Mandate policy', description: 'Get one policy from the authenticated human organization context.',
     inputSchema: policyIdInputSchema, annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   }, async ({ policyId }) => {
+    if (api.context.principalType !== 'HUMAN') return errorResult(new Error('HUMAN_PRINCIPAL_REQUIRED'));
     const policy = await api.getPolicy(policyId);
     return policy === null ? errorResult(new Error('RESOURCE_NOT_FOUND')) : serialize(policy);
   });
   server.registerTool('mandate_action_simulate', {
-    title: 'Simulate a Mandate action', description: 'Run deterministic policy preflight; this tool does not reserve budget or submit a transaction.',
+    title: 'Simulate a Mandate action', description: 'Human-only deterministic policy preflight; this tool does not reserve budget or submit a transaction.',
     inputSchema: actionInputSchema, annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
   }, async (input) => {
+    if (api.context.principalType !== 'HUMAN') return errorResult(new Error('HUMAN_PRINCIPAL_REQUIRED'));
     const action = ActionIntentSchema.parse({ ...input, organizationId: api.context.organizationId });
     return serialize(await api.simulateAction(action));
   });
@@ -169,7 +171,7 @@ export class MandateRestMcpClient implements MandateMcpApi {
     catch (error: unknown) { if (error instanceof Error && error.message === 'MANDATE_API_RESOURCE_NOT_FOUND') return null; throw error; }
   }
   public async getReceipt(actionId: string): Promise<JsonValue | null> {
-    const result = z.object({ receipts: z.array(JsonValueSchema) }).safeParse(await this.getJson(this.organizationPath('/receipts?limit=100')));
+    const result = z.object({ receipts: z.array(JsonValueSchema) }).safeParse(await this.getJson(this.organizationPath(`/receipts?limit=1&actionId=${encodeURIComponent(actionId)}`)));
     if (!result.success) throw new Error('MANDATE_API_INVALID_RECEIPT_LIST');
     return result.data.receipts.find((receipt) => z.object({ actionId: z.string() }).safeParse(receipt).success && z.object({ actionId: z.string() }).parse(receipt).actionId === actionId) ?? null;
   }

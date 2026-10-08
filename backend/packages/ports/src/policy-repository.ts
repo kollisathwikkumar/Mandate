@@ -32,6 +32,7 @@ export interface PolicyListItem {
 export interface PolicyRepository {
   getHumanRole(organizationId: string, subject: string): Promise<string | null>;
   listPolicies(organizationId: string): Promise<readonly PolicyListItem[]>;
+  getRevision(organizationId: string, policyId: string, revision: number): Promise<PolicyRevision | null>;
   simulateAction(organizationId: string, policyId: string, action: ActionIntent): Promise<PolicySimulationResult>;
   createDraft(input: PolicyWriteInput): Promise<PolicyWriteOutcome>;
   createRevision(input: PolicyWriteInput): Promise<PolicyWriteOutcome>;

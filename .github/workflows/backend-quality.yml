@@ -1,0 +1,111 @@
+name: Full-stack quality
+
+on:
+  push:
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'MANDATE_ARCHITECTURE.md'
+      - '.github/workflows/backend-quality.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - 'MANDATE_ARCHITECTURE.md'
+      - '.github/workflows/backend-quality.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install locked dependencies
+        working-directory: backend
+        run: npm ci --ignore-scripts
+      - name: Install the test Anvil binary
+        working-directory: backend
+        run: npm rebuild @foundry-rs/anvil --foreground-scripts
+      - name: Typecheck and build
+        working-directory: backend
+        run: |
+          npm run typecheck
+          npm run build
+      - name: Lint backend
+        working-directory: backend
+        run: npm run lint
+      - name: Run unit tests
+        working-directory: backend
+        run: npm test -- --reporter=dot
+      - name: Run dependency audit
+        working-directory: backend
+        run: npm audit
+      - name: Create integration test database
+        working-directory: backend
+        run: >-
+          node --input-type=module -e
+          "import pg from 'pg'; const client = new pg.Client({ connectionString: 'postgresql://postgres:postgres@127.0.0.1:5432/postgres' }); await client.connect(); await client.query('CREATE DATABASE mandate_test'); await client.end();"
+      - name: Run PostgreSQL and Safe/Anvil integration tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/mandate_test
+        run: npm run test:integration -- --reporter=dot
+      - name: Gate combined backend source coverage
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/mandate_test
+        run: npm run test:coverage:all -- --reporter=dot
+      - name: Validate local deployment compose
+        working-directory: backend
+        run: docker compose config -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked dependencies
+        working-directory: frontend
+        run: npm ci --ignore-scripts
+      - name: Lint, typecheck, test, and build frontend
+        working-directory: frontend
+        run: |
+          npm run lint
+          npm run typecheck
+          npm test -- --reporter=dot
+          npm run build
+      - name: Run frontend dependency audit
+        working-directory: frontend
+        run: npm audit

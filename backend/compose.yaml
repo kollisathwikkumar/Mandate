@@ -15,5 +15,144 @@ services:
       timeout: 3s
       retries: 15
 
+  migrate:
+    build: .
+    image: mandate-backend:local
+    command: ["dist/packages/adapters/src/postgres/migrate-cli.js"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://mandate:mandate@postgres:5432/mandate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    image: mandate-backend:local
+    command: ["dist/apps/api/src/server.js"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://mandate:mandate@postgres:5432/mandate
+      MANDATE_JWT_JWKS_URL: ${MANDATE_JWT_JWKS_URL:-https://identity.example.invalid/.well-known/jwks.json}
+      MANDATE_JWT_ISSUER: ${MANDATE_JWT_ISSUER:-https://identity.example.invalid/}
+      MANDATE_JWT_AUDIENCE: ${MANDATE_JWT_AUDIENCE:-mandate-api}
+      MANDATE_RATE_LIMIT_HMAC_KEY: ${MANDATE_RATE_LIMIT_HMAC_KEY:-local-development-only-hmac-key-32-bytes}
+      MANDATE_CORS_ALLOWED_ORIGINS: ${MANDATE_CORS_ALLOWED_ORIGINS:-}
+      MANDATE_EVM_RPC_URLS: ${MANDATE_EVM_RPC_URLS:-{}}
+      MANDATE_CHAIN_CONFIRMATIONS: ${MANDATE_CHAIN_CONFIRMATIONS:-{}}
+      MANDATE_BROADCAST_RPC_FALLBACK_URLS: ${MANDATE_BROADCAST_RPC_FALLBACK_URLS:-{}}
+      HOST: 0.0.0.0
+      PORT: 3000
+      MANDATE_SERVICE_NAME: mandate-api
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3100:3100"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  worker:
+    build: .
+    image: mandate-backend:local
+    command: ["dist/apps/worker/src/server.js"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://mandate:mandate@postgres:5432/mandate
+      MANDATE_SERVICE_NAME: mandate-worker
+      MANDATE_WORKER_POLL_MS: 1000
+      MANDATE_EVM_RPC_URLS: ${MANDATE_EVM_RPC_URLS:-{}}
+      MANDATE_CHAIN_CONFIRMATIONS: ${MANDATE_CHAIN_CONFIRMATIONS:-{}}
+      MANDATE_RECEIPT_RPC_FALLBACK_URLS: ${MANDATE_RECEIPT_RPC_FALLBACK_URLS:-{}}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  integration:
+    build:
+      context: .
+      target: build
+    image: mandate-backend:test
+    profiles: ["tests"]
+    command: ["npm", "run", "test:integration", "--", "--reporter=dot"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://mandate:mandate@postgres:5432/mandate_test
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  indexer:
+    image: mandate-backend:local
+    profiles: ["indexer"]
+    command: ["dist/apps/chain-indexer/src/server.js"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://mandate:mandate@postgres:5432/mandate
+      MANDATE_SERVICE_NAME: mandate-indexer
+      MANDATE_EVM_RPC_URLS: ${MANDATE_EVM_RPC_URLS:-{}}
+      MANDATE_INDEXER_RPC_FALLBACK_URLS: ${MANDATE_INDEXER_RPC_FALLBACK_URLS:-{}}
+      MANDATE_INDEXER_START_BLOCKS: ${MANDATE_INDEXER_START_BLOCKS:-{}}
+      MANDATE_INDEXER_CONFIRMATIONS: ${MANDATE_INDEXER_CONFIRMATIONS:-12}
+      MANDATE_INDEXER_MAX_BLOCK_RANGE: ${MANDATE_INDEXER_MAX_BLOCK_RANGE:-100}
+      MANDATE_INDEXER_POLL_MS: ${MANDATE_INDEXER_POLL_MS:-3000}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+
+  mcp-http:
+    image: mandate-backend:local
+    profiles: ["mcp"]
+    command: ["dist/apps/mcp-server/src/hosted-main.js"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://mandate:mandate@postgres:5432/mandate
+      MANDATE_SERVICE_NAME: mandate-mcp-http
+      MANDATE_API_URL: http://127.0.0.1:3000
+      MANDATE_JWT_ISSUER: ${MANDATE_JWT_ISSUER:-https://identity.example.invalid/}
+      MANDATE_JWT_AUDIENCE: ${MANDATE_JWT_AUDIENCE:-mandate-api,http://localhost:3100/mcp}
+      MANDATE_MCP_RESOURCE_URL: ${MANDATE_MCP_RESOURCE_URL:-http://localhost:3100/mcp}
+      MANDATE_MCP_ALLOWED_ORIGINS: ${MANDATE_MCP_ALLOWED_ORIGINS:-}
+      MCP_PORT: 3100
+      HOST: 0.0.0.0
+    network_mode: "service:api"
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+
 volumes:
   mandate-postgres-data:

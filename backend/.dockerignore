@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+dist
+coverage
+*.tgz
+*.diff
+VERIFICATION.txt
+.DS_Store

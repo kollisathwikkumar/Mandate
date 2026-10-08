@@ -1,6 +1,6 @@
 # Mandate backend
 
-Backend-only implementation of `../MANDATE_ARCHITECTURE_WITH_MODEL_KEYS.md`. No frontend is included.
+Backend-only implementation aligned to `../MANDATE_ARCHITECTURE.md`. No frontend is included.
 
 ## Current phase
 
@@ -24,7 +24,36 @@ npm run build
 
 Start local PostgreSQL using Docker Compose (`docker compose up -d postgres`) or a local PostgreSQL 17 installation. Copy `.env.example` to `.env.local`, set `DATABASE_URL`, `MANDATE_JWT_JWKS_URL`, `MANDATE_JWT_ISSUER`, and `MANDATE_JWT_AUDIENCE`, then run `npm run db:migrate` and `npm run dev:api`. The JWKS URL must use HTTPS except for loopback development. Apply migrations only with a deployment role that owns the Mandate schema. `.env.local` is ignored by git. The model-provider key is optional and is not used by the authorization path. Production key storage requires AWS Secrets Manager credentials and least-privilege IAM; integration tests use an in-memory test adapter. Keys are never returned on reads or stored in PostgreSQL. Configure the SDK runtime region using `AWS_REGION` or `AWS_DEFAULT_REGION`.
 
-To run the chain indexer, configure the RPC URL and a start block for every chain, run migrations, then start `npm run dev:indexer`. The start block must cover the deployment/account events you need indexed; the default sample is illustrative only. Choose confirmation depth according to the target chain's finality model before relying on indexed observations.
+### Containerized local backend
+
+`Dockerfile` builds the TypeScript backend in a Node.js 22 build stage and runs the compiled API, worker, indexer, or hosted MCP entrypoint as the non-root `node` user. The root filesystem is read-only for API/worker containers; Compose drops Linux capabilities, disables privilege escalation, keeps PostgreSQL data in a named volume, binds development ports to loopback, and waits for PostgreSQL plus a successful migration job before starting the API and worker. The optional local MCP service shares the API container's network namespace so its development-only loopback API URL passes the existing HTTPS/loopback validation. This Compose stack is for local development and integration only: it intentionally uses a local password, a development HMAC key, and a placeholder OIDC issuer that will not authenticate real users.
+
+```sh
+cp .env.example .env                 # ignored by git; replace OIDC issuer/JWKS/audience
+docker compose up --build -d         # PostgreSQL, migrations, API, worker
+curl --fail http://127.0.0.1:3000/health/ready
+docker compose logs -f api worker
+docker compose down                  # retains the PostgreSQL volume
+```
+
+Set real `MANDATE_JWT_JWKS_URL`, `MANDATE_JWT_ISSUER`, and `MANDATE_JWT_AUDIENCE` values in `.env` before authenticated API use. Optional chain indexing uses `docker compose --profile indexer up -d indexer` after setting `MANDATE_EVM_RPC_URLS` and `MANDATE_INDEXER_START_BLOCKS`; hosted MCP uses `docker compose --profile mcp up --build -d api worker mcp-http` and requires `MANDATE_JWT_AUDIENCE` to include both the API audience and MCP resource URL (for local testing, `mandate-api,http://localhost:3100/mcp`). Recreate API and MCP together because this local-only profile shares their network namespace to use loopback HTTP. The indexer and MCP profiles are opt-in. Do not use `docker compose down -v` unless local database data should be destroyed. Production should use a managed/hardened PostgreSQL deployment, external secret injection, private networking/TLS, separately scoped migration credentials, pinned/scanned image digests, and the cloud qualification gates below; this local Compose file is not a production deployment template.
+
+### Production PostgreSQL TLS
+
+The API, worker, chain indexer, and migration command use certificate-verified PostgreSQL TLS whenever `NODE_ENV=production`. Production startup requires `DATABASE_SSL_CA_PATH` to point to a readable PEM CA bundle (for Amazon RDS, mount the current AWS RDS global bundle into the container). The clients set `rejectUnauthorized: true`; they do not support disabling verification. Do not put `sslmode`, `sslcert`, `sslkey`, or `sslrootcert` in `DATABASE_URL`, because node-postgres replaces the supplied TLS object when those URL parameters are present. Local Compose explicitly sets `NODE_ENV=development`; this exception is for its private local PostgreSQL service only. For AWS, mount the CA bundle read-only and configure the path in each database-using task.
+
+If the API is behind an ALB or reverse proxy, set `MANDATE_TRUSTED_PROXY_CIDRS` to only the proxy subnet CIDRs and restrict the API's network ingress to the proxy security group. Forwarded IP headers are ignored by default; catch-all proxy trust is rejected. This enables the shared PostgreSQL rate limiter to distinguish clients without trusting arbitrary caller-supplied `X-Forwarded-For` headers.
+
+For a browser frontend on a different origin, configure `MANDATE_CORS_ALLOWED_ORIGINS` as a comma-separated list of exact HTTPS origins (HTTP loopback is allowed only for local development). Wildcard and `null` origins are rejected; cookies are not enabled. The API permits only its supported methods and `Authorization`, `Content-Type`, and `Idempotency-Key` request headers. Leave the setting unset when the frontend and API share one TLS origin. Add the precise staging console origin before browser testing.
+
+To run the complete PostgreSQL-backed integration suite inside the Compose network, create its separate test database once and start the `tests` profile (the suite applies migrations itself):
+
+```sh
+docker compose exec -T postgres createdb -U mandate mandate_test
+docker compose --profile tests run --rm integration
+```
+
+To run the chain indexer, configure the RPC URL and a start block for every chain, run migrations, then start `npm run dev:indexer`. The start block must cover the deployment/account events you need indexed; the default sample is illustrative only. Optionally set `MANDATE_INDEXER_RPC_FALLBACK_URLS` to a JSON object mapping each chain ID to an ordered array of HTTPS URLs (loopback HTTP is accepted for local testing). The indexer checks each endpoint's chain ID once before use, sticks to the last healthy endpoint, and still verifies canonical block continuity and every log hash before committing; if all endpoints fail or report a different chain ID, the batch fails closed. The configured providers remain trusted RPC inputs (a matching chain ID is not a proof of canonical history), so vet provider independence before production. Indexer fallbacks only affect indexer reads; action broadcasting uses the separate `MANDATE_BROADCAST_RPC_FALLBACK_URLS` setting and retries only the exact same caller-signed bytes/hash, never a changed nonce or newly signed transaction. Choose confirmation depth according to the target chain's finality model before relying on indexed observations.
 
 Database integration tests require a real PostgreSQL database and skip when `DATABASE_URL` is absent:
 
@@ -32,7 +61,13 @@ Database integration tests require a real PostgreSQL database and skip when `DAT
 DATABASE_URL=postgresql://mandate:mandate@127.0.0.1:5432/mandate npm run test:integration
 ```
 
-Coverage thresholds are 100% for the configured implemented unit sources. Contract integration is separately run with `npm run test:contracts` against local Anvil and Safe 1.5.0 artifacts. New backend phases must add tests first, observe the expected failure, implement, then run the full test, typecheck, and build suites again.
+The unit-only `npm run test:coverage` gate requires 100% for the selected policy/domain sources. The combined source gate covers every app/package `src` file and requires PostgreSQL integration tests to run; execute it through Compose so it reaches the `mandate_test` service database:
+
+```sh
+docker compose --profile tests run --build --rm integration npm run test:coverage:all -- --reporter=dot
+```
+
+The combined gate currently requires at least 75% statements, 70% branches, 80% functions, and 82% lines across all app/package sources. CI runs unit tests, PostgreSQL/Safe/Anvil integration tests, then the combined coverage gate. Contract integration is also available through `npm run test:contracts` against local Anvil and Safe 1.5.0 artifacts. New backend phases must add tests first, observe the expected failure, implement, then run the full test, typecheck, build, database integration, and coverage suites again.
 
 ## Architecture alignment
 
@@ -113,6 +148,8 @@ The worker also polls submitted attempts when both `MANDATE_EVM_RPC_URLS` and `M
 
 The worker can still run in outbox-only mode when both chain maps are empty. To enable execution reconciliation, configure both maps with identical chain keys and an explicit 1–10000 confirmation depth for each chain; unmatched maps fail startup. Example values are in `.env.example`. The current receipt poller recovers exact canonical replacements and classifies a dropped submission only when caller-signed sender/nonce metadata, a hash-verified finalized checkpoint after authorization expiry, complete persisted indexer coverage from the authorization snapshot, and absence of an exact execution event all agree. Legacy records lacking submission metadata or a persisted indexer coverage boundary remain pending. Deep-reorg detection now checks settled receipts against the live canonical hash and DB indexer finality; a verified mismatch marks the action/attempt/receipt REORGED, reactivates its reservation hold, pauses the account, and emits hash-linked incident events. The owner-only reorg-resolution route records the reservation disposition without changing REORGED evidence or reactivating the account. Account verification is a separate explicit step and is rejected until every deep-reorg reservation for that account has an owner disposition.
 
+Optionally configure `MANDATE_RECEIPT_RPC_FALLBACK_URLS` as a chain-ID-to-ordered-array JSON map (one to three HTTPS endpoints per configured primary; loopback HTTP is accepted for local tests). The worker probes every endpoint's chain ID before use, skips unavailable or mismatched endpoints, and sequentially retries read calls on the remaining verified endpoints. Empty receipt/block reads also try the next endpoint so lagging providers do not prematurely report missing evidence. This setting affects receipt reconciliation reads only; transaction broadcasting is not retried through it. As with indexer RPC failover, matching chain IDs do not prove provider independence or canonical history, so reconciliation still compares receipt and block hashes and operators must assess provider independence.
+
 
 ### Fee-replaced execution transactions (Phase 24)
 
@@ -130,13 +167,13 @@ All API, worker, indexer, and MCP start/dev scripts initialize the OpenTelemetry
 
 Incoming HTTP and Fastify spans omit query values (the query attribute is replaced with `[REDACTED]`); outbound HTTP auto-instrumentation and header capture are disabled; PostgreSQL instrumentation keeps parameter/result reporting off. Fastify structured logs redact authorization, cookie, API/model key, invitation token, secret, private-key, and raw-transaction fields. API responses include `x-request-id` for log/trace correlation. Model-provider keys remain independent of OpenTelemetry credentials and optional for deterministic/local testing.
 
-As of Phase 34, the open architecture work included rate limiting; Phase 35 implements the shared API limiter. Remaining work: CLI command-family completion and package release, IdP provisioning, and full production qualification.
+Rate limiting and the complete CLI command families are implemented (Phases 35 and 45). Phase 46 packages the built CLI as an installable local tarball while keeping this backend monorepo private. Phase 47 adds a local container stack and Compose-native integration harness; Phase 48 adds deterministic randomized rejection/invariant probes against the local Anvil deployment of Safe v1.5.0 and Mandate contracts; Phase 49 isolates each Safe integration test and covers mixed accepted/rejected agent-call state transitions; Phase 50 adds chain-ID-checked sequential RPC failover for indexer reads; Phase 51 adds chain-verified read failover to receipt reconciliation; Phase 52 retries exact signed transaction bytes across configured, chain-ID-checked broadcaster endpoints after ambiguous RPC outcomes; Phase 53 validates immutable migration checksums before applying SQL. Production hardening enforces verified PostgreSQL TLS for database-using processes and supports explicit trusted-proxy CIDRs for correct rate-limit client identity. Remaining work: choose a registry namespace and publish only when approved, integrate identity-provider provisioning, independently review transaction-broadcast recovery, provision least-privilege AWS roles/services, deploy and live-verify AWS integrations, implement the frontend/route sections, and complete full Phase F qualification.
 
 ### Shared API rate limiting (Phase 35)
 
 The API applies a PostgreSQL-backed atomic fixed-window limit to `/api/v1/*` requests (except OpenAPI), defaulting to 120 requests per source IP per 60 seconds. PostgreSQL is shared coordination across API replicas; request counts use an UPSERT so concurrent requests cannot exceed the window through a read/modify/write race. Responses include `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, and `Retry-After` when exhausted, with a typed `429 RATE_LIMITED` error. Health endpoints remain available for probes. Only an HMAC-SHA-256 subject digest is stored; production must configure the same random `MANDATE_RATE_LIMIT_HMAC_KEY` (at least 32 bytes) on each replica. Local development generates an ephemeral process key. Stale windows are opportunistically pruned.
 
-Still open: completion of CLI command families/package release packaging, identity-provider provisioning, and full Phase F production qualification.
+Still open: registry namespace selection/publication, identity-provider provisioning, live AWS S3 Object Lock/SES and IAM verification, product-workflow decisions, and full Phase F qualification (longer stateful fuzz/invariants, adapter conformance, writer/reader failover, replay/reorg drills, independent review, and monitored test deployment).
 
 ### TypeScript SDK and CLI (Phase 37)
 
@@ -158,7 +195,7 @@ const policies = await client.listPolicies();
 
 Run the CLI with `npm run mandate -- --help`, or after a build with `npm run mandate:built -- policies list`. It uses `MANDATE_API_URL`, `MANDATE_API_TOKEN`, and optional `MANDATE_ORGANIZATION_ID`; action JSON is schema-validated before it is sent to the API. `organizations create <name>` supports first-time human onboarding with no existing tenant. `invitations accept <@file|->` accepts a verified-email invitation without placing its one-time token in shell history. `model-providers list|set|test|disable|delete` manages optional organization model-provider credentials through the existing API. For `set`, supply a protected key file with `@/path/to/key` or pipe input with `-`; literal command-line key arguments are rejected so they do not enter shell history. The command prints only the API's masked metadata response. Existing `apps/mcp-server` is the MCP interface. All three interfaces call the same REST API and backend services.
 
-The SDK covers the OpenAPI business operation matrix, including no-organization onboarding, 204 responses, and audit cursor pagination. The CLI exposes the core policy/action commands, organization onboarding/invitation acceptance, and model-provider credential lifecycle; remaining CLI command families and package publication/release packaging remain follow-up work. Other open architecture work: identity-provider provisioning and full Phase F production qualification.
+The SDK covers the OpenAPI business operation matrix, including no-organization onboarding, 204 responses, and audit cursor pagination. The CLI now exposes the backend SDK command families for onboarding, members/invitations, accounts, policies, actions, audit, receipts, alerts, webhooks, and model-provider credentials. `npm run package:cli` creates a Node.js 22+ installable tarball in `dist/release` without changing the private backend monorepo. Publishing that tarball under a selected registry namespace remains a release action. Other open architecture work: identity-provider provisioning and full Phase F production qualification.
 
 ### Signed audit exports (Phase 42)
 

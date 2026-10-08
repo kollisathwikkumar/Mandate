@@ -113,6 +113,8 @@ const actionDetailSchema = z.object({
   reservation: z.object({ state: z.enum(['ACTIVE', 'CONSUMED', 'RELEASED', 'EXPIRED']), amount: z.string(), leaseExpiresAt: z.string().datetime() }).strict().nullable(),
   events: z.array(auditEventSchema),
 }).strict();
+const actionListItemSchema = actionDetailSchema.omit({ reservation: true, events: true }).strict();
+const actionListSchema = z.object({ actions: z.array(actionListItemSchema) }).strict();
 const receiptSchema = z.object({
   id: z.string(), actionId: z.string(), chainId: z.number().int().positive(), transactionHash: z.string(),
   blockNumber: z.string(), blockHash: z.string(), status: z.enum(['TENTATIVE', 'FINAL', 'REORGED']),
@@ -308,6 +310,22 @@ export const openApiDocument = {
         },
       },
     },
+    '/api/v1/orgs/{orgId}/policies/{policyId}/revisions/{revision}': {
+      get: {
+        operationId: 'getImmutablePolicyRevision', security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'orgId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'policyId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'revision', in: 'path', required: true, schema: { type: 'integer', minimum: 1 } },
+        ],
+        responses: {
+          '200': { description: 'Tenant-scoped canonical policy revision body', content: jsonContent(ref('PolicyRevision')) },
+          '400': { description: 'Invalid revision identifier', content: jsonContent(ref('ApiError')) },
+          '401': { description: 'Missing or invalid bearer credential', content: jsonContent(ref('ApiError')) },
+          '404': { description: 'Policy revision or tenant was not found', content: jsonContent(ref('ApiError')) },
+        },
+      },
+    },
     '/api/v1/orgs/{orgId}/policies/{policyId}/activate': {
       post: {
         operationId: 'preparePolicyActivation',
@@ -412,6 +430,20 @@ export const openApiDocument = {
       },
     },
     '/api/v1/orgs/{orgId}/actions': {
+      get: {
+        operationId: 'listOrganizationActions', security: [{ bearerAuth: [] }],
+        parameters: [
+          { name: 'orgId', in: 'path', required: true, schema: { type: 'string' } },
+          { name: 'state', in: 'query', required: false, schema: { type: 'string', enum: ACTION_STATES } },
+          { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
+        ],
+        responses: {
+          '200': { description: 'Tenant-scoped action summaries; agent principals see only their own actions', content: jsonContent(actionListSchema) },
+          '400': { description: 'Invalid list filters', content: jsonContent(ref('ApiError')) },
+          '401': { description: 'Missing or invalid bearer credential', content: jsonContent(ref('ApiError')) },
+          '404': { description: 'Organization is not visible to this principal', content: jsonContent(ref('ApiError')) },
+        },
+      },
       post: {
         operationId: 'requestAgentAction',
         security: [{ bearerAuth: [] }],
@@ -566,6 +598,7 @@ export const openApiDocument = {
         parameters: [
           { name: 'orgId', in: 'path', required: true, schema: { type: 'string' } },
           { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 100, default: 50 } },
+          { name: 'actionId', in: 'query', required: false, schema: { type: 'string', minLength: 1, maxLength: 128, pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]*$' } },
         ],
         responses: { '200': { description: 'Tenant-scoped indexed chain receipts', content: jsonContent(z.toJSONSchema(z.object({ receipts: z.array(receiptSchema) }).strict())) }, '400': { description: 'Invalid pagination', content: jsonContent(ref('ApiError')) } },
       },
@@ -753,6 +786,7 @@ export const openApiDocument = {
       ActionApprovalReplay: z.toJSONSchema(actionApprovalReplaySchema),
       ActionDeepReorgResolution: z.toJSONSchema(actionDeepReorgResolutionSchema),
       ActionDetail: z.toJSONSchema(actionDetailSchema, { io: 'input' }),
+      ActionList: z.toJSONSchema(actionListSchema, { io: 'input' }),
       AuditEvent: z.toJSONSchema(auditEventSchema),
       Receipt: z.toJSONSchema(receiptSchema),
       Alert: z.toJSONSchema(alertSchema),

@@ -1,5 +1,5 @@
 import { Interface, TypedDataEncoder, ZeroAddress } from 'ethers';
-import { compileEvmSafePolicy, type CompiledEvmSafePolicy } from './evm-safe-policy-compiler.js';
+import { compileEvmSafePolicy } from './evm-safe-policy-compiler.js';
 import type { PolicyRevision } from '../../policy/src/schema.js';
 import type { SafePolicyActivationState } from '../../ports/src/safe-policy-activation-reader.js';
 

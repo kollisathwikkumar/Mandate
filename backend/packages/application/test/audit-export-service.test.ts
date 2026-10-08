@@ -22,6 +22,7 @@ function repository(role: string | null, events: readonly AuditEventRecord[]): A
   return {
     getHumanRole: async () => role,
     getAction: async () => null,
+    listActions: async () => [],
     listAuditEvents: async () => events,
     listReceipts: async () => [],
     listAlerts: async () => [],

@@ -15,6 +15,9 @@ import { readInvitationEmailRuntimeConfig } from './invitation-email-runtime.js'
 import { AesGcmInvitationTokenCipher } from '../../../packages/adapters/src/crypto/aes-gcm-invitation-token-cipher.js';
 import { SesInvitationEmailTransport } from '../../../packages/adapters/src/aws/ses-invitation-email-transport.js';
 import { InvitationEmailDeliveryWorker } from './invitation-email-worker.js';
+import { parseReceiptRpcFallbackUrls } from './receipt-rpc-config.js';
+import { runBatchWithIsolation, type WorkerComponent } from './batch-boundary.js';
+import { postgresTlsOptions } from '../../../packages/adapters/src/postgres/connection-options.js';
 
 function parseNumberMap(value: string | undefined, name: string, maximum: number): Readonly<Record<number, number>> {
   if (value === undefined || value.trim() === '') return {};
@@ -57,10 +60,16 @@ if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 100 || pollInterva
   throw new Error('MANDATE_WORKER_POLL_MS must be an integer from 100 to 60000');
 }
 
-const pool = new Pool({ connectionString: databaseUrl, max: 5, application_name: 'mandate-worker' });
+const pool = new Pool({
+  connectionString: databaseUrl,
+  max: 5,
+  application_name: 'mandate-worker',
+  ...postgresTlsOptions(databaseUrl, process.env.NODE_ENV, process.env.DATABASE_SSL_CA_PATH),
+});
 const worker = new OutboxWorker(pool);
 const webhookWorker = new WebhookDeliveryWorker(pool, new AwsWebhookSecretStore(), new PublicHttpsWebhookTransport());
 const rpcUrls = parseRpcUrls(process.env.MANDATE_EVM_RPC_URLS);
+const receiptRpcFallbackUrls = parseReceiptRpcFallbackUrls(process.env.MANDATE_RECEIPT_RPC_FALLBACK_URLS, rpcUrls);
 const confirmationDepths = parseNumberMap(process.env.MANDATE_CHAIN_CONFIRMATIONS, 'MANDATE_CHAIN_CONFIRMATIONS', 10000);
 if ((Object.keys(rpcUrls).length === 0) !== (Object.keys(confirmationDepths).length === 0)
   || Object.keys(rpcUrls).some((chainId) => confirmationDepths[Number(chainId)] === undefined)
@@ -69,7 +78,7 @@ if ((Object.keys(rpcUrls).length === 0) !== (Object.keys(confirmationDepths).len
 }
 const reconciler = Object.keys(rpcUrls).length === 0 || Object.keys(confirmationDepths).length === 0
   ? null
-  : new ExecutionReconciliationService(new ExecutionReconciliationStore(pool), new EvmExecutionReceiptReader(rpcUrls), confirmationDepths);
+  : new ExecutionReconciliationService(new ExecutionReconciliationStore(pool), new EvmExecutionReceiptReader(rpcUrls, receiptRpcFallbackUrls), confirmationDepths);
 const auditAnchorConfig = readAuditAnchorRuntimeConfig(process.env);
 const auditAnchorService = auditAnchorConfig === null ? null : new AuditAnchorService(
   new AuditAnchorStore(pool),
@@ -89,40 +98,47 @@ let nextAuditAnchorAt = auditAnchorConfig === null ? Number.POSITIVE_INFINITY : 
 let stopping = false;
 process.once('SIGINT', () => { stopping = true; });
 process.once('SIGTERM', () => { stopping = true; });
+const logBatchFailure = (component: WorkerComponent): void => {
+  process.stderr.write(`${JSON.stringify({ component, event: 'batch_failed' })}\n`);
+};
 
-while (!stopping) {
-  const now = Date.now();
-  if (auditAnchorService !== null && auditAnchorConfig !== null && now >= nextAuditAnchorAt) {
-    const result = await auditAnchorService.runBatch();
-    if (result.candidates > 0 || result.failed > 0) {
-      process.stdout.write(`${JSON.stringify({ component: 'audit-anchor-worker', ...result })}\n`);
+try {
+  while (!stopping) {
+    const now = Date.now();
+    if (auditAnchorService !== null && auditAnchorConfig !== null && now >= nextAuditAnchorAt) {
+      const result = await runBatchWithIsolation('audit-anchor-worker', () => auditAnchorService.runBatch(), logBatchFailure);
+      if (result !== null && (result.candidates > 0 || result.failed > 0)) {
+        process.stdout.write(`${JSON.stringify({ component: 'audit-anchor-worker', ...result })}\n`);
+      }
+      nextAuditAnchorAt = Date.now() + auditAnchorConfig.intervalMs;
     }
-    nextAuditAnchorAt = Date.now() + auditAnchorConfig.intervalMs;
-  }
-  const result = await worker.runBatch();
-  if (result.claimed > 0 || result.failed > 0) {
-    process.stdout.write(`${JSON.stringify({ component: 'outbox-worker', ...result })}\n`);
-  }
-  const webhookResult = await webhookWorker.runBatch();
-  if (webhookResult.claimed > 0) {
-    process.stdout.write(`${JSON.stringify({ component: 'webhook-delivery-worker', ...webhookResult })}\n`);
-  }
-  const invitationEmailResult = invitationEmailWorker === null ? null : await invitationEmailWorker.runBatch();
-  if (invitationEmailResult !== null && (invitationEmailResult.claimed > 0 || invitationEmailResult.failed > 0)) {
-    process.stdout.write(`${JSON.stringify({ component: 'invitation-email-worker', ...invitationEmailResult })}\n`);
-  }
-  let reconciliationWorked = false;
-  if (reconciler !== null) {
-    const reconciled = await reconciler.runBatch();
-    if (reconciled.finalized > 0 || reconciled.dropped > 0 || reconciled.deepReorged > 0 || reconciled.reorged > 0 || reconciled.failed > 0) {
-      process.stdout.write(`${JSON.stringify({ component: 'execution-reconciler', ...reconciled })}\n`);
-      reconciliationWorked = reconciled.finalized > 0 || reconciled.dropped > 0 || reconciled.deepReorged > 0 || reconciled.reorged > 0;
+    const result = await runBatchWithIsolation('outbox-worker', () => worker.runBatch(), logBatchFailure);
+    if (result !== null && (result.claimed > 0 || result.failed > 0)) {
+      process.stdout.write(`${JSON.stringify({ component: 'outbox-worker', ...result })}\n`);
+    }
+    const webhookResult = await runBatchWithIsolation('webhook-delivery-worker', () => webhookWorker.runBatch(), logBatchFailure);
+    if (webhookResult !== null && webhookResult.claimed > 0) {
+      process.stdout.write(`${JSON.stringify({ component: 'webhook-delivery-worker', ...webhookResult })}\n`);
+    }
+    const invitationEmailResult = invitationEmailWorker === null ? null
+      : await runBatchWithIsolation('invitation-email-worker', () => invitationEmailWorker.runBatch(), logBatchFailure);
+    if (invitationEmailResult !== null && (invitationEmailResult.claimed > 0 || invitationEmailResult.failed > 0)) {
+      process.stdout.write(`${JSON.stringify({ component: 'invitation-email-worker', ...invitationEmailResult })}\n`);
+    }
+    let reconciliationWorked = false;
+    if (reconciler !== null) {
+      const reconciled = await runBatchWithIsolation('execution-reconciler', () => reconciler.runBatch(), logBatchFailure);
+      if (reconciled !== null && (reconciled.finalized > 0 || reconciled.dropped > 0 || reconciled.deepReorged > 0 || reconciled.reorged > 0 || reconciled.failed > 0)) {
+        process.stdout.write(`${JSON.stringify({ component: 'execution-reconciler', ...reconciled })}\n`);
+        reconciliationWorked = reconciled.finalized > 0 || reconciled.dropped > 0 || reconciled.deepReorged > 0 || reconciled.reorged > 0;
+      }
+    }
+    if ((result === null || result.claimed === 0) && (webhookResult === null || webhookResult.claimed === 0)
+      && (invitationEmailResult === null || invitationEmailResult.claimed === 0) && !reconciliationWorked && !stopping) {
+      const anchorWait = Math.max(0, nextAuditAnchorAt - Date.now());
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, anchorWait)));
     }
   }
-  if (result.claimed === 0 && webhookResult.claimed === 0 && (invitationEmailResult === null || invitationEmailResult.claimed === 0) && !reconciliationWorked && !stopping) {
-    const anchorWait = Math.max(0, nextAuditAnchorAt - Date.now());
-    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, anchorWait)));
-  }
+} finally {
+  await pool.end();
 }
-
-await pool.end();

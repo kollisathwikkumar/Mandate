@@ -224,6 +224,7 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
     });
     expect(specification.json<{ info: { description: string } }>().info.description).toContain('429 RATE_LIMITED');
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/policies/{policyId}/revisions');
+    expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/policies/{policyId}/revisions/{revision}');
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/policies/{policyId}/activate');
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/policies/{policyId}/activate/finalize');
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/policies/{policyId}/revoke');
@@ -235,6 +236,7 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/actions/{actionId}/reorg-resolution');
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/policies/{policyId}/simulate');
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/actions/{actionId}');
+    expect(specification.json<{ paths: Record<string, { get?: { operationId: string } }> }>().paths['/api/v1/orgs/{orgId}/actions']?.get?.operationId).toBe('listOrganizationActions');
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/audit-events');
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/audit-exports');
     expect(specification.json<{ paths: Record<string, unknown> }>().paths).toHaveProperty('/api/v1/orgs/{orgId}/receipts');
@@ -713,7 +715,7 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
     expect(persisted.rows[0]?.audit_count).toBe('1');
     const replay = await app.inject({ method: 'POST', url: `/api/v1/orgs/${organizationId}/agents`, headers, payload: body });
     expect(replay.statusCode).toBe(200);
-    expect(replay.json()).toMatchObject({ agent: { id: body.id } });
+    expect(replay.json()).toMatchObject({ agent: { id: body.id }, replayed: true });
     expect(replay.json()).not.toHaveProperty('credential');
     const mismatchedReplay = await app.inject({
       method: 'POST',
@@ -845,6 +847,11 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
       [organizationId, 'treasury-policy'],
     );
     expect(revisionRows.rows.map(({ revision }) => revision)).toEqual([1, 2]);
+    const revisionRead = await app.inject({ method: 'GET', url: `/api/v1/orgs/${organizationId}/policies/treasury-policy/revisions/2`, headers: { authorization: `Bearer ${ownerToken}` } });
+    expect(revisionRead.statusCode).toBe(200);
+    expect(revisionRead.json()).toEqual(revisionTwo);
+    const missingRevision = await app.inject({ method: 'GET', url: `/api/v1/orgs/${organizationId}/policies/treasury-policy/revisions/0`, headers: { authorization: `Bearer ${ownerToken}` } });
+    expect(missingRevision.statusCode).toBe(400);
 
     const repeatedRevision = await app.inject({
       method: 'POST',
@@ -984,6 +991,51 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
       [organizationId],
     );
     expect(simulationSideEffects.rows[0]).toEqual(simulationBaseline.rows[0]);
+    const deniedActionId = 'transfer-denied-recipient';
+    const deniedAction = {
+      ...actionBody, actionId: deniedActionId, idempotencyKey: 'action-denied-recipient',
+      recipient: `0x${'6'.repeat(40)}`,
+    };
+    const deniedSimulation = await app.inject({
+      method: 'POST', url: `/api/v1/orgs/${organizationId}/policies/treasury-policy/simulate`,
+      headers: { authorization: `Bearer ${ownerToken}` }, payload: deniedAction,
+    });
+    expect(deniedSimulation.statusCode).toBe(200);
+    expect(deniedSimulation.json()).toMatchObject({ verdict: 'BLOCK', reason: 'RECIPIENT_DENIED' });
+    const submissionsBeforeDeny = submittedRawTransactions.length;
+    const deniedResponse = await app.inject({
+      method: 'POST', url: `/api/v1/orgs/${organizationId}/actions`,
+      headers: { authorization: `Bearer ${actionAgentToken}`, 'idempotency-key': deniedAction.idempotencyKey },
+      payload: deniedAction,
+    });
+    expect(deniedResponse.statusCode).toBe(201);
+    expect(deniedResponse.json()).toMatchObject({ actionId: deniedActionId, state: 'BLOCKED', verdict: 'BLOCK', reason: 'RECIPIENT_DENIED' });
+    const deniedDetail = await app.inject({
+      method: 'GET', url: `/api/v1/orgs/${organizationId}/actions/${deniedActionId}`,
+      headers: { authorization: `Bearer ${ownerToken}` },
+    });
+    expect(deniedDetail.statusCode).toBe(200);
+    expect(deniedDetail.json()).toMatchObject({ state: 'BLOCKED', verdict: 'BLOCK', reason: 'RECIPIENT_DENIED' });
+    const deniedAuthorization = await app.inject({
+      method: 'POST', url: `/api/v1/orgs/${organizationId}/actions/${deniedActionId}/authorize`,
+      headers: { authorization: `Bearer ${actionAgentToken}`, 'idempotency-key': 'authorize-denied-recipient' },
+    });
+    expect(deniedAuthorization.statusCode).toBe(409);
+    const deniedExecution = await app.inject({
+      method: 'POST', url: `/api/v1/orgs/${organizationId}/actions/${deniedActionId}/execute`,
+      headers: { authorization: `Bearer ${actionAgentToken}`, 'idempotency-key': 'execute-denied-recipient' },
+      payload: { signature: `0x${'11'.repeat(65)}`, rawTransaction: '0x01' },
+    });
+    expect(deniedExecution.statusCode).toBe(409);
+    expect(submittedRawTransactions).toHaveLength(submissionsBeforeDeny);
+    const deniedPersistence = await pool.query<{ decisions: string; reservations: string; execution_submissions: string; audit_events: string }>(
+      `SELECT (SELECT count(*)::text FROM decisions WHERE organization_id = $1 AND action_id = $2) AS decisions,
+        (SELECT count(*)::text FROM reservations WHERE organization_id = $1 AND action_id = $2) AS reservations,
+        (SELECT count(*)::text FROM action_execution_submissions WHERE organization_id = $1 AND action_id = $2) AS execution_submissions,
+        (SELECT count(*)::text FROM audit_events WHERE organization_id = $1 AND subject_id = $2 AND event_type = 'ACTION_BLOCKED') AS audit_events`,
+      [organizationId, deniedActionId],
+    );
+    expect(deniedPersistence.rows[0]).toEqual({ decisions: '1', reservations: '0', execution_submissions: '0', audit_events: '1' });
     const actionResponse = await app.inject({
       method: 'POST',
       url: `/api/v1/orgs/${organizationId}/actions`,
@@ -1001,6 +1053,13 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
     });
     expect(actionDetail.statusCode).toBe(200);
     expect(actionDetail.json()).toMatchObject({ actionId: 'transfer-1', state: 'RESERVED', actionHash: expect.stringMatching(/^0x[0-9a-f]{64}$/) });
+    const actionList = await app.inject({ method: 'GET', url: `/api/v1/orgs/${organizationId}/actions?state=RESERVED&limit=5`, headers: { authorization: `Bearer ${ownerToken}` } });
+    expect(actionList.statusCode).toBe(200);
+    expect(actionList.json()).toMatchObject({ actions: [{ actionId: 'transfer-1', state: 'RESERVED', policyId: 'treasury-policy' }] });
+    const unauthenticatedActionList = await app.inject({ method: 'GET', url: `/api/v1/orgs/${organizationId}/actions` });
+    expect(unauthenticatedActionList.statusCode).toBe(401);
+    const invalidActionList = await app.inject({ method: 'GET', url: `/api/v1/orgs/${organizationId}/actions?state=NOT_A_STATE`, headers: { authorization: `Bearer ${ownerToken}` } });
+    expect(invalidActionList.statusCode).toBe(400);
     const unrelatedAgent = await app.inject({
       method: 'POST',
       url: `/api/v1/orgs/${organizationId}/agents`,
@@ -1009,6 +1068,9 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
     });
     expect(unrelatedAgent.statusCode).toBe(201);
     const unrelatedAgentToken = unrelatedAgent.json<{ credential: { token: string } }>().credential.token;
+    const unrelatedActionList = await app.inject({ method: 'GET', url: `/api/v1/orgs/${organizationId}/actions?limit=100`, headers: { authorization: `Bearer ${unrelatedAgentToken}` } });
+    expect(unrelatedActionList.statusCode).toBe(200);
+    expect(unrelatedActionList.json()).toEqual({ actions: [] });
     const hiddenAction = await app.inject({
       method: 'GET',
       url: `/api/v1/orgs/${organizationId}/actions/transfer-1`,
@@ -1189,6 +1251,27 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
       [organizationId, 'transfer-1'],
     );
     expect(pendingSubmission.rows[0]).toEqual({ status: 'PENDING', transaction_hash: keccak256(signedTransaction).toLowerCase() });
+    await pool.query("UPDATE accounts SET status = 'PAUSED' WHERE organization_id = $1 AND id = 'policy-account'", [organizationId]);
+    const pausedRetry = await app.inject({
+      method: 'POST', url: executeUrl, headers: executeHeaders,
+      payload: { signature: agentSignature, rawTransaction: signedTransaction },
+    });
+    await pool.query("UPDATE accounts SET status = 'ACTIVE' WHERE organization_id = $1 AND id = 'policy-account'", [organizationId]);
+    expect(pausedRetry.statusCode).toBe(409);
+    expect(submittedRawTransactions).toEqual([signedTransaction]);
+    await pool.query("UPDATE policy_grants SET state = 'PENDING', granted_at = NULL WHERE organization_id = $1 AND policy_id = 'treasury-policy'", [organizationId]);
+    const ungrantedRetry = await app.inject({
+      method: 'POST', url: executeUrl, headers: executeHeaders,
+      payload: { signature: agentSignature, rawTransaction: signedTransaction },
+    });
+    await pool.query("UPDATE policy_grants SET state = 'ACTIVE', granted_at = now() WHERE organization_id = $1 AND policy_id = 'treasury-policy'", [organizationId]);
+    expect(ungrantedRetry.statusCode).toBe(409);
+    expect(submittedRawTransactions).toEqual([signedTransaction]);
+    const stillPending = await pool.query<{ status: string }>(
+      'SELECT status FROM action_execution_submissions WHERE organization_id = $1 AND action_id = $2',
+      [organizationId, 'transfer-1'],
+    );
+    expect(stillPending.rows[0]).toEqual({ status: 'PENDING' });
     const concurrentExecutions = await Promise.all([
       app.inject({ method: 'POST', url: executeUrl, headers: executeHeaders, payload: { signature: agentSignature, rawTransaction: signedTransaction } }),
       app.inject({ method: 'POST', url: executeUrl, headers: executeHeaders, payload: { signature: agentSignature, rawTransaction: signedTransaction } }),
@@ -1776,7 +1859,7 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
     }
     await expect(createApiServer({ pool, jwksUrl, issuer, audience, logger: false, rateLimitHmacKey: 'short' }))
       .rejects.toThrow('MANDATE_RATE_LIMIT_HMAC_KEY must contain at least 32 UTF-8 bytes');
-    const limitedApp = await createApiServer({ pool, jwksUrl, issuer, audience, logger: false, rateLimit: { maxRequests: 2, windowSeconds: 1 }, rateLimitHmacKey });
+    const limitedApp = await createApiServer({ pool, jwksUrl, issuer, audience, logger: false, rateLimit: { maxRequests: 2, windowSeconds: 86_400 }, rateLimitHmacKey });
     try {
       const responses = await Promise.all(Array.from({ length: 5 }, () => limitedApp.inject({
         method: 'GET', url: '/api/v1/me', remoteAddress: sourceIp, headers: { 'x-forwarded-for': randomUUID() },
@@ -1786,7 +1869,10 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
       expect(limited?.headers['retry-after']).toMatch(/^[1-9][0-9]*$/);
       expect(limited?.headers['ratelimit-limit']).toBe('2');
       expect(limited?.json()).toMatchObject({ error: { code: 'RATE_LIMITED' } });
-      await new Promise((resolve) => setTimeout(resolve, 1100));
+      await pool.query(
+        "UPDATE api_rate_limit_windows SET window_start = window_start - interval '1 day' WHERE subject_hash = $1",
+        [subjectHash],
+      );
       const nextWindow = await limitedApp.inject({ method: 'GET', url: '/api/v1/me', remoteAddress: sourceIp });
       expect(nextWindow.statusCode).toBe(401);
       const stored = await pool.query<{ request_count: number; subject_hash: string }>(
@@ -1798,6 +1884,43 @@ describe.skipIf(connectionString === undefined)('REST API/PostgreSQL integration
       expect(stored.rows[0]?.subject_hash).not.toContain(sourceIp);
     } finally {
       await pool.query('DELETE FROM api_rate_limit_windows WHERE subject_hash = $1', [subjectHash]);
+      await limitedApp.close();
+    }
+  });
+
+  it('uses forwarded client IPs only when the immediate proxy is in the configured CIDR allowlist', async () => {
+    const proxyIp = '10.24.8.19';
+    const clientIp = `2001:db8:24::${randomUUID().replaceAll('-', '')}`;
+    const rateLimitHmacKey = 'integration-trusted-proxy-hmac-key-32-bytes';
+    const clientSubjectHash = createHmac('sha256', rateLimitHmacKey).update(`ip:${clientIp}`, 'utf8').digest('hex');
+    const proxySubjectHash = createHmac('sha256', rateLimitHmacKey).update(`ip:${proxyIp}`, 'utf8').digest('hex');
+    const limitedApp = await createApiServer({
+      pool,
+      jwksUrl,
+      issuer,
+      audience,
+      logger: false,
+      rateLimit: { maxRequests: 1, windowSeconds: 86_400 },
+      rateLimitHmacKey,
+      trustedProxyCidrs: ['10.24.8.0/24'],
+    });
+    try {
+      const responses = await Promise.all([1, 2].map(() => limitedApp.inject({
+        method: 'GET',
+        url: '/api/v1/me',
+        remoteAddress: proxyIp,
+        headers: { 'x-forwarded-for': clientIp },
+      })));
+      expect(responses.map((response) => response.statusCode).sort()).toEqual([401, 429]);
+      const stored = await pool.query<{ request_count: number }>(
+        'SELECT request_count FROM api_rate_limit_windows WHERE subject_hash = $1',
+        [clientSubjectHash],
+      );
+      expect(stored.rows).toEqual([{ request_count: 2 }]);
+      const proxyEntry = await pool.query('SELECT 1 FROM api_rate_limit_windows WHERE subject_hash = $1', [proxySubjectHash]);
+      expect(proxyEntry.rowCount).toBe(0);
+    } finally {
+      await pool.query('DELETE FROM api_rate_limit_windows WHERE subject_hash = ANY($1::text[])', [[clientSubjectHash, proxySubjectHash]]);
       await limitedApp.close();
     }
   });

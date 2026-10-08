@@ -1,0 +1,30 @@
+# Local-only browser verification identity provider. This override is never used
+# by the production compose file and publishes the test IdP only on loopback.
+services:
+  api:
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3100:3100"
+      - "127.0.0.1:8080:8080"
+    environment:
+      MANDATE_JWT_JWKS_URL: http://127.0.0.1:8080/realms/mandate-local/protocol/openid-connect/certs
+      MANDATE_JWT_ISSUER: http://127.0.0.1:8080/realms/mandate-local
+      MANDATE_JWT_AUDIENCE: mandate-api
+
+  local-oidc:
+    image: quay.io/keycloak/keycloak:26.8.0
+    profiles: ["local-oidc"]
+    command: ["start-dev", "--hostname-strict=false", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: local-admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${MANDATE_LOCAL_OIDC_ADMIN_PASSWORD:?set a local-only password in backend/.env}
+    volumes:
+      - ./keycloak/mandate-local-realm.json:/opt/keycloak/data/import/mandate-local-realm.json:ro
+      - mandate-local-oidc-data:/opt/keycloak/data
+    network_mode: "service:api"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  mandate-local-oidc-data:

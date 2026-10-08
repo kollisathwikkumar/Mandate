@@ -16,7 +16,7 @@ export interface CliApi {
   requestAction(action: ActionIntent): Promise<JsonValue>;
   getAction(actionId: string): Promise<JsonValue | null>;
   getReceipts(limit?: number): Promise<JsonValue>;
-  getAuditEvents(limit?: number): Promise<JsonValue>;
+  getAuditEvents(limit?: number, beforeSequence?: string): Promise<JsonValue>;
   getAlerts(limit?: number): Promise<JsonValue>;
   listModelProviderCredentials(): Promise<JsonValue>;
   setModelProviderCredential(provider: CliModelProvider, apiKey: string, idempotencyKey: string): Promise<JsonValue>;
@@ -61,9 +61,9 @@ export type CliCommand =
   | { readonly kind: 'action-get'; readonly actionId: string }
   | { readonly kind: 'action-simulate'; readonly input: string }
   | { readonly kind: 'action-request'; readonly input: string }
-  | { readonly kind: 'receipts-list' }
-  | { readonly kind: 'audit-list' }
-  | { readonly kind: 'alerts-list' }
+  | { readonly kind: 'receipts-list'; readonly limit: number }
+  | { readonly kind: 'audit-list'; readonly limit: number; readonly beforeSequence?: string }
+  | { readonly kind: 'alerts-list'; readonly limit: number }
   | { readonly kind: 'model-providers-list' }
   | { readonly kind: 'model-provider-set'; readonly provider: CliModelProvider; readonly keyInput: string }
   | { readonly kind: 'model-provider-delete'; readonly provider: CliModelProvider }
@@ -124,10 +124,10 @@ export const CLI_USAGE = `Mandate CLI
   mandate invitations list
   mandate invitations create <email> <OWNER|ADMIN|APPROVER|VIEWER>
   mandate invitations revoke <invitation-id>
-  mandate receipts list
-  mandate audit list
+  mandate receipts list [limit]
+  mandate audit list [limit] [before-sequence]
   mandate audit export [limit] [before-sequence]
-  mandate alerts list
+  mandate alerts list [limit]
   mandate webhooks list
   mandate webhooks create <@webhook-json|->
   mandate webhooks enable <endpoint-id>
@@ -144,7 +144,7 @@ export const CLI_USAGE = `Mandate CLI
   mandate invitations accept <@token-file|->
 
 Configure MANDATE_API_URL and MANDATE_API_TOKEN. Set MANDATE_ORGANIZATION_ID when the identity has multiple organizations.
-Provider keys are read from a file or stdin so they do not appear in command history.`;
+Provider keys, invitation tokens, signatures, and raw transactions are read from protected files or stdin rather than command-line literals.`;
 
 export function parseCliCommand(args: readonly string[]): CliCommand {
   if (args.length === 0 || args[0] === 'help' || args[0] === '--help' || args[0] === '-h') return { kind: 'help' };
@@ -167,8 +167,8 @@ export function parseCliCommand(args: readonly string[]): CliCommand {
     return { kind: 'policy-revoke-finalize', policyId: first, input: jsonReference(second) };
   }
   if (resource === 'actions' && verb === 'get' && args.length === 3 && first !== undefined) return { kind: 'action-get', actionId: first };
-  if (resource === 'actions' && verb === 'simulate' && args.length === 3 && first !== undefined) return { kind: 'action-simulate', input: first };
-  if (resource === 'actions' && verb === 'request' && args.length === 3 && first !== undefined) return { kind: 'action-request', input: first };
+  if (resource === 'actions' && verb === 'simulate' && args.length === 3 && first !== undefined) return { kind: 'action-simulate', input: jsonReference(first) };
+  if (resource === 'actions' && verb === 'request' && args.length === 3 && first !== undefined) return { kind: 'action-request', input: jsonReference(first) };
   if (resource === 'actions' && verb === 'approve' && args.length === 5 && first !== undefined && second !== undefined && args[4] !== undefined) {
     const outcome = z.enum(['APPROVED', 'DENIED']).parse(second);
     const actionHash = z.string().regex(/^0x[0-9a-f]{64}$/).parse(args[4]);
@@ -176,7 +176,10 @@ export function parseCliCommand(args: readonly string[]): CliCommand {
   }
   if (resource === 'actions' && verb === 'authorize' && args.length === 3 && first !== undefined) return { kind: 'action-authorize', actionId: first };
   if (resource === 'actions' && verb === 'execute' && args.length === 5 && first !== undefined && second !== undefined && args[4] !== undefined) {
-    return { kind: 'action-execute', actionId: first, signatureInput: secretReference(second), transactionInput: secretReference(args[4]) };
+    const signatureInput = secretReference(second);
+    const transactionInput = secretReference(args[4]);
+    if (signatureInput === '-' && transactionInput === '-') throw new Error('Only one action-execute input may read from stdin; use a file for the other');
+    return { kind: 'action-execute', actionId: first, signatureInput, transactionInput };
   }
   if (resource === 'actions' && verb === 'resolve-reorg' && args.length === 4 && first !== undefined && second !== undefined) {
     return { kind: 'action-resolve-reorg', actionId: first, input: jsonReference(second) };
@@ -189,14 +192,22 @@ export function parseCliCommand(args: readonly string[]): CliCommand {
     return { kind: 'member-set-role', subject: first, role: z.enum(['OWNER', 'ADMIN', 'APPROVER', 'VIEWER']).parse(second) };
   }
   if (resource === 'members' && verb === 'remove' && args.length === 3 && first !== undefined) return { kind: 'member-remove', subject: first };
-  if (resource === 'receipts' && verb === 'list' && args.length === 2) return { kind: 'receipts-list' };
-  if (resource === 'audit' && verb === 'list' && args.length === 2) return { kind: 'audit-list' };
+  if (resource === 'receipts' && verb === 'list' && args.length >= 2 && args.length <= 3) {
+    return { kind: 'receipts-list', limit: first === undefined ? 100 : positiveInteger(first, 100, 'receipt limit') };
+  }
+  if (resource === 'audit' && verb === 'list' && args.length >= 2 && args.length <= 4) {
+    const limit = first === undefined ? 100 : positiveInteger(first, 100, 'audit limit');
+    const beforeSequence = second === undefined ? undefined : z.string().regex(/^[1-9][0-9]{0,18}$/).parse(second);
+    return { kind: 'audit-list', limit, ...(beforeSequence === undefined ? {} : { beforeSequence }) };
+  }
   if (resource === 'audit' && verb === 'export' && args.length <= 4) {
     const limit = args[2] === undefined ? 1_000 : positiveInteger(args[2], 10_000, 'audit export limit');
     const beforeSequence = args[3] === undefined ? undefined : z.string().regex(/^[1-9][0-9]{0,18}$/).parse(args[3]);
     return { kind: 'audit-export', limit, ...(beforeSequence === undefined ? {} : { beforeSequence }) };
   }
-  if (resource === 'alerts' && verb === 'list' && args.length === 2) return { kind: 'alerts-list' };
+  if (resource === 'alerts' && verb === 'list' && args.length >= 2 && args.length <= 3) {
+    return { kind: 'alerts-list', limit: first === undefined ? 100 : positiveInteger(first, 100, 'alert limit') };
+  }
   if (resource === 'webhooks' && verb === 'list' && args.length === 2) return { kind: 'webhook-list' };
   if (resource === 'webhooks' && verb === 'create' && args.length === 3 && first !== undefined) return { kind: 'webhook-create', input: jsonReference(first) };
   if (resource === 'webhooks' && (verb === 'enable' || verb === 'disable') && args.length === 3 && first !== undefined) {
@@ -238,11 +249,13 @@ export function parseCliCommand(args: readonly string[]): CliCommand {
 }
 
 function jsonReference(value: string): string {
+  // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
   if (value !== '-' && !/^@[^\u0000\s]+$/.test(value)) throw new Error('Use @file or - to read JSON input');
   return value;
 }
 
 function secretReference(value: string): string {
+  // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
   if (value !== '-' && !/^@[^\u0000\s]+$/.test(value)) throw new Error('Use @file or - to read sensitive input; do not pass it as a literal command-line argument');
   return value;
 }
@@ -273,9 +286,9 @@ export async function executeCliCommand(
     case 'action-get': return api.getAction(command.actionId);
     case 'action-simulate': return api.simulateAction(await readAction(command.input));
     case 'action-request': return api.requestAction(await readAction(command.input));
-    case 'receipts-list': return api.getReceipts();
-    case 'audit-list': return api.getAuditEvents();
-    case 'alerts-list': return api.getAlerts();
+    case 'receipts-list': return api.getReceipts(command.limit);
+    case 'audit-list': return api.getAuditEvents(command.limit, command.beforeSequence);
+    case 'alerts-list': return api.getAlerts(command.limit);
     case 'model-providers-list': return api.listModelProviderCredentials();
     case 'model-provider-set': {
       const apiKey = (await readSecret(command.keyInput)).trim();

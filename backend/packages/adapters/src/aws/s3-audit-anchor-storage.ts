@@ -10,6 +10,13 @@ import {
   type PutObjectCommandOutput,
 } from '@aws-sdk/client-s3';
 import type { AuditAnchorStorage, AuditAnchorStorageResult } from '../../../ports/src/audit-anchor.js';
+import { resolveAwsRegion } from './region.js';
+
+export function resolveS3Region(awsRegion: string | undefined, awsDefaultRegion: string | undefined): string | undefined {
+  return resolveAwsRegion(awsRegion, awsDefaultRegion);
+}
+
+const configuredRegion = resolveS3Region(process.env.AWS_REGION, process.env.AWS_DEFAULT_REGION);
 
 export interface S3ObjectLockApi {
   putObject(input: PutObjectCommandInput): Promise<PutObjectCommandOutput>;
@@ -19,7 +26,7 @@ export interface S3ObjectLockApi {
 
 export class AwsS3ObjectLockApi implements S3ObjectLockApi {
   public constructor(private readonly client = new S3Client(
-    process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION },
+    configuredRegion === undefined ? {} : { region: configuredRegion },
   )) {}
 
   public async putObject(input: PutObjectCommandInput): Promise<PutObjectCommandOutput> {

@@ -28,7 +28,7 @@ function storage(fail = false): AuditAnchorStorage & { readonly bodies: string[]
   const keys: string[] = [];
   return {
     bodies, keys,
-    async putImmutable(key, body, retentionDays) {
+    async putImmutable(key, body, _retentionDays) {
       keys.push(key); bodies.push(body);
       if (fail) throw new Error('S3 is unavailable');
       return { versionId: 'version-1', retainedUntil: '2027-10-06T00:00:00.000Z' };

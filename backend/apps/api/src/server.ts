@@ -2,6 +2,10 @@ import { Pool } from 'pg';
 import { createApiServer } from './app.js';
 import { AwsAuditExportKeyStore } from '../../../packages/adapters/src/aws/audit-export-key-store.js';
 import { AesGcmInvitationTokenCipher } from '../../../packages/adapters/src/crypto/aes-gcm-invitation-token-cipher.js';
+import { postgresTlsOptions } from '../../../packages/adapters/src/postgres/connection-options.js';
+import { parseBroadcastRpcFallbackUrls } from './broadcast-rpc-config.js';
+import { parseTrustedProxyCidrs } from './proxy-config.js';
+import { parseCorsAllowedOrigins } from './cors-config.js';
 
 function parseChainRpcUrls(value: string | undefined): Readonly<Record<number, string>> {
   if (value === undefined || value.trim() === '') return {};
@@ -65,6 +69,8 @@ function parseJwtAudience(value: string | undefined): string | string[] | undefi
   return audiences.length === 1 ? audiences[0] : audiences;
 }
 const audience = parseJwtAudience(audienceValue);
+const trustedProxyCidrs = parseTrustedProxyCidrs(process.env.MANDATE_TRUSTED_PROXY_CIDRS);
+const corsAllowedOrigins = parseCorsAllowedOrigins(process.env.MANDATE_CORS_ALLOWED_ORIGINS);
 const host = process.env.HOST ?? '127.0.0.1';
 const portText = process.env.PORT ?? '3000';
 const port = Number(portText);
@@ -74,7 +80,12 @@ if (databaseUrl === undefined || jwksUrl === undefined || issuer === undefined |
 }
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be a valid TCP port');
 
-const pool = new Pool({ connectionString: databaseUrl, max: 20, application_name: 'mandate-api' });
+const pool = new Pool({
+  connectionString: databaseUrl,
+  max: 20,
+  application_name: 'mandate-api',
+  ...postgresTlsOptions(databaseUrl, process.env.NODE_ENV, process.env.DATABASE_SSL_CA_PATH),
+});
 const auditSigningSecretReference = process.env.MANDATE_AUDIT_SIGNING_SECRET_ARN;
 const auditExportSigner = auditSigningSecretReference === undefined || auditSigningSecretReference.trim() === ''
   ? undefined
@@ -84,9 +95,10 @@ const invitationTokenCipher = invitationTokenEncryptionKey === undefined || invi
   ? undefined
   : new AesGcmInvitationTokenCipher(invitationTokenEncryptionKey);
 const chainRpcUrls = parseChainRpcUrls(process.env.MANDATE_EVM_RPC_URLS);
+const chainRpcFallbackUrls = parseBroadcastRpcFallbackUrls(process.env.MANDATE_BROADCAST_RPC_FALLBACK_URLS, chainRpcUrls);
 const trustedSafeSingletons = parseTrustedSafeSingletons(process.env.MANDATE_SAFE_SINGLETONS);
 const chainConfirmations = parseChainConfirmations(process.env.MANDATE_CHAIN_CONFIRMATIONS);
-const app = await createApiServer({ pool, jwksUrl, issuer, audience, logger: true, chainRpcUrls, trustedSafeSingletons, chainConfirmations, ...(auditExportSigner === undefined ? {} : { auditExportSigner }), ...(invitationTokenCipher === undefined ? {} : { invitationTokenCipher }) });
+const app = await createApiServer({ pool, jwksUrl, issuer, audience, logger: true, chainRpcUrls, chainRpcFallbackUrls, trustedSafeSingletons, chainConfirmations, ...(trustedProxyCidrs === undefined ? {} : { trustedProxyCidrs }), ...(corsAllowedOrigins === undefined ? {} : { corsAllowedOrigins }), ...(auditExportSigner === undefined ? {} : { auditExportSigner }), ...(invitationTokenCipher === undefined ? {} : { invitationTokenCipher }) });
 
 try {
   await app.listen({ host, port });

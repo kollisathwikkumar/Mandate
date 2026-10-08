@@ -308,6 +308,15 @@ export class PolicyStore implements PolicyRepository {
     }));
   }
 
+  public async getRevision(organizationId: string, policyId: string, revision: number): Promise<PolicyRevision | null> {
+    const result = await this.pool.query<{ canonical_json: unknown }>(
+      'SELECT canonical_json FROM policy_revisions WHERE organization_id = $1 AND policy_id = $2 AND revision = $3',
+      [organizationId, policyId, revision],
+    );
+    const canonical = result.rows[0]?.canonical_json;
+    return canonical === undefined ? null : PolicyRevisionSchema.parse(canonical);
+  }
+
   public async simulateAction(organizationId: string, policyId: string, action: ActionIntent): Promise<PolicySimulationResult> {
     return simulateInPostgres(this.pool, organizationId, policyId, action);
   }

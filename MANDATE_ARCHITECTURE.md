@@ -1,6 +1,6 @@
 # Mandate — production backend architecture and product map
 
-**Status:** architecture proposal, not implemented code.  
+**Status:** implementation underway; backend slices through Phase 53 are implemented locally and verified. Phase 53 adds immutable migration checksum validation; production hardening requires certificate-verified PostgreSQL TLS and explicit reverse-proxy CIDR trust. The combined unit/PostgreSQL/Safe/Anvil coverage gate currently passes 346 tests and reports 76.73% statements, 71.64% branches, 81.70% functions, and 83.30% lines across app/package source; startup, AWS adapter, and other uncovered paths remain visible for follow-up. AWS region resolution now trims blank values consistently across S3, SES, Secrets Manager, and audit-export key clients. The installable CLI tarball is built locally but not published. A local containerized API/worker/PostgreSQL stack is running; the Safe suite checks randomized state transitions, and the indexer/receipt readers validate RPC chain IDs and fail over for reads while the broadcaster retries only identical caller-signed transaction bytes. Each RPC remains a trusted source, so provider independence and production qualification remain open. The separate `frontend/` workspace now contains the 20-route console/marketing experience and its local build/test record; authenticated mutation coverage is still partial, and production identity-provider integration, deployment, and end-to-end qualification remain open. The architecture is not yet production-qualified or deployed in AWS.
 **Design goal:** bounded, accountable AI-agent actions, with enforcement at the resource that can actually execute the action.  
 **Inspiration:** AgentLedger's documented `quote → evaluate → reserve → sign → settle → reconcile` payment flow. Mandate generalizes the policy lifecycle for a tightly bounded set of smart-account actions; it does not copy AgentLedger's implementation or claim its feature coverage.
 
@@ -282,7 +282,7 @@ Build policy, approval, execution, receipt, and audit modules behind ports. Add 
 
 ### Phase E — interfaces
 
-Expose the same services through REST, SDK, MCP, and CLI. Build console pages from the route table; no parallel business logic in frontend or MCP.
+Expose the same services through REST, SDK, MCP, and CLI. The React console in `frontend/` implements the documented public pages and protected workspace routes against these shared APIs; it must not duplicate policy or authorization business logic. Its local tests and contract check pass, while authenticated mutation coverage and production identity/deployment gates remain open as recorded in `frontend/VERIFICATION.md`.
 
 ### Phase F — production qualification
 

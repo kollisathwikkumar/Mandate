@@ -8,8 +8,10 @@ import {
 import type { ModelSecretStore } from '../../../ports/src/model-secret-store.js';
 import type { ModelProvider } from '../../../ports/src/model-credential-repository.js';
 import type { WebhookSecretStore } from '../../../ports/src/webhook.js';
+import { resolveAwsRegion } from './region.js';
 
-const configuredRegion = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
+const configuredRegion = resolveAwsRegion(process.env.AWS_REGION, process.env.AWS_DEFAULT_REGION);
+const secretRecoveryWindowDays = 7;
 
 export class AwsModelSecretStore implements ModelSecretStore {
   public constructor(private readonly client = new SecretsManagerClient(
@@ -34,7 +36,7 @@ export class AwsModelSecretStore implements ModelSecretStore {
 
   public async delete(secretReference: string): Promise<void> {
     try {
-      await this.client.send(new DeleteSecretCommand({ SecretId: secretReference, ForceDeleteWithoutRecovery: true }));
+      await this.client.send(new DeleteSecretCommand({ SecretId: secretReference, RecoveryWindowInDays: secretRecoveryWindowDays }));
     } catch (error: unknown) {
       if (typeof error === 'object' && error !== null && '$metadata' in error && 'name' in error && error.name === 'ResourceNotFoundException') return;
       throw error;
@@ -65,7 +67,7 @@ export class AwsWebhookSecretStore implements WebhookSecretStore {
 
   public async delete(secretReference: string): Promise<void> {
     try {
-      await this.client.send(new DeleteSecretCommand({ SecretId: secretReference, ForceDeleteWithoutRecovery: true }));
+      await this.client.send(new DeleteSecretCommand({ SecretId: secretReference, RecoveryWindowInDays: secretRecoveryWindowDays }));
     } catch (error: unknown) {
       if (typeof error === 'object' && error !== null && '$metadata' in error && 'name' in error && error.name === 'ResourceNotFoundException') return;
       throw error;

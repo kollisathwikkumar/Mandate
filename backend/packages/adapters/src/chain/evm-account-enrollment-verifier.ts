@@ -47,6 +47,13 @@ function parseHex(value: unknown, expectedBytes?: number): string {
   return value.toLowerCase();
 }
 
+function parseQuantity(value: unknown): string {
+  if (typeof value !== 'string' || !/^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(value)) {
+    throw new ChainVerificationError('RPC_UNAVAILABLE');
+  }
+  return value.toLowerCase();
+}
+
 function addressFromWord(value: unknown): string {
   const word = parseHex(value, 32);
   const address = `0x${word.slice(-40)}`;
@@ -75,9 +82,9 @@ export class EvmAccountEnrollmentVerifier implements AccountEnrollmentVerifier {
       throw new ChainVerificationError('UNSUPPORTED_CHAIN');
     }
     const onChainIdHex = await this.callRpc(url, 'eth_chainId', []);
-    const onChainId = BigInt(parseHex(onChainIdHex));
+    const onChainId = BigInt(parseQuantity(onChainIdHex));
     if (onChainId !== BigInt(request.chainId)) throw new ChainVerificationError('CHAIN_ID_MISMATCH');
-    const blockTag = parseHex(await this.callRpc(url, 'eth_blockNumber', []));
+    const blockTag = parseQuantity(await this.callRpc(url, 'eth_blockNumber', []));
     const blockHash = this.blockHash(await this.callRpc(url, 'eth_getBlockByNumber', [blockTag, false]));
     await this.requireCode(url, safeAddress, blockTag);
     const [singletonSlot, masterCopyWord] = await Promise.all([

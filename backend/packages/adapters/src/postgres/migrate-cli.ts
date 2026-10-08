@@ -1,12 +1,17 @@
 import { Client } from 'pg';
 import { migrate } from './migrate.js';
+import { postgresTlsOptions } from './connection-options.js';
 
 const connectionString = process.env.DATABASE_URL;
 if (connectionString === undefined || connectionString.length === 0) {
   process.stderr.write('DATABASE_URL is required\n');
   process.exitCode = 1;
 } else {
-  const client = new Client({ connectionString, application_name: 'mandate-migrator' });
+  const client = new Client({
+    connectionString,
+    application_name: 'mandate-migrator',
+    ...postgresTlsOptions(connectionString, process.env.NODE_ENV, process.env.DATABASE_SSL_CA_PATH),
+  });
   try {
     await client.connect();
     const applied = await migrate(client);

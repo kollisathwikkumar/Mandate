@@ -2,7 +2,7 @@ import { ApplicationAccessError } from './agent-service.js';
 import type { Principal } from '../../domain/src/principal.js';
 import type { ActionAuthorizationContext, ActionAuthorizationRepository } from '../../ports/src/action-authorization-repository.js';
 import type { ActionExecutionSubmissionIdentity, ActionExecutionSubmissionRepository, ActionExecutionSubmissionResult } from '../../ports/src/action-execution-submission-repository.js';
-import { ActionExecutionAuthorizationError, parseActionExecutionAuthorization, validateSignedActionExecutionTransaction } from '../../chain/src/action-execution-authorization.js';
+import { ActionExecutionAuthorizationError, validateSignedActionExecutionTransaction } from '../../chain/src/action-execution-authorization.js';
 import { ActionTransactionSubmissionError, type ActionTransactionSubmitter } from '../../ports/src/action-transaction-submitter.js';
 import { RepositoryAccessError } from '../../ports/src/repository-errors.js';
 

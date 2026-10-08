@@ -38,6 +38,19 @@ export interface ActionDetailRecord {
   readonly events: readonly AuditEventRecord[];
 }
 
+export interface ActionListItem {
+  readonly actionId: string;
+  readonly policyId: string;
+  readonly policyRevision: number;
+  readonly actionHash: string;
+  readonly state: ActionState;
+  readonly verdict: PolicyVerdict | null;
+  readonly reason: PolicyReasonCode | null;
+  readonly action: ActionIntent;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
 export interface ReceiptRecord {
   readonly id: string;
   readonly actionId: string;
@@ -61,7 +74,8 @@ export interface AlertRecord {
 export interface ActivityRepository {
   getHumanRole(organizationId: string, subject: string): Promise<string | null>;
   getAction(organizationId: string, actionId: string, agentId: string | null): Promise<ActionDetailRecord | null>;
+  listActions(organizationId: string, agentId: string | null, state: ActionState | null, limit: number): Promise<readonly ActionListItem[]>;
   listAuditEvents(organizationId: string, agentId: string | null, limit: number, beforeSequence: string | null): Promise<readonly AuditEventRecord[]>;
-  listReceipts(organizationId: string, agentId: string | null, limit: number): Promise<readonly ReceiptRecord[]>;
+  listReceipts(organizationId: string, agentId: string | null, limit: number, actionId?: string | null): Promise<readonly ReceiptRecord[]>;
   listAlerts(organizationId: string, limit: number): Promise<readonly AlertRecord[]>;
 }

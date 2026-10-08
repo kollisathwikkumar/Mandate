@@ -36,5 +36,5 @@ export interface ModelCredentialRepository {
   writeCredential(input: ModelCredentialWriteInput): Promise<ModelCredentialWriteOutcome>;
   updateCredentialState(organizationId: string, principalId: string, provider: ModelProvider, state: ModelCredentialState): Promise<ModelCredentialRecord | null>;
   deleteCredential(organizationId: string, principalId: string, provider: ModelProvider): Promise<ModelCredentialRecord | null>;
-  markVerified(organizationId: string, provider: ModelProvider, state: ModelCredentialState): Promise<void>;
+  markVerified(organizationId: string, principalId: string, provider: ModelProvider, secretReference: string, state: 'ACTIVE' | 'ERROR'): Promise<ModelCredentialRecord | null>;
 }

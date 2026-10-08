@@ -22,6 +22,57 @@ export interface EvmIndexerRpc {
   logs(fromBlock: number, toBlock: number, addresses: readonly string[]): Promise<readonly EvmLog[]>;
 }
 
+/**
+ * Sequential RPC failover for indexer reads. Each endpoint must attest the
+ * configured chain ID before a method runs; the indexer still verifies block
+ * continuity and log hashes before committing any returned data.
+ */
+export class FailoverEvmIndexerRpc implements EvmIndexerRpc {
+  private activeEndpointIndex = 0;
+  private readonly verifiedEndpoints = new WeakSet<EvmIndexerRpc>();
+
+  public constructor(private readonly endpoints: readonly EvmIndexerRpc[], private readonly expectedChainId: number) {
+    if (endpoints.length === 0) throw new RangeError('At least one indexer RPC endpoint is required');
+    if (!Number.isSafeInteger(expectedChainId) || expectedChainId < 1) throw new RangeError('expectedChainId must be a positive safe integer');
+  }
+
+  private async withEndpoint<T>(operation: (endpoint: EvmIndexerRpc) => Promise<T>): Promise<T> {
+    for (let offset = 0; offset < this.endpoints.length; offset += 1) {
+      const index = (this.activeEndpointIndex + offset) % this.endpoints.length;
+      const endpoint = this.endpoints[index];
+      if (endpoint === undefined) continue;
+      try {
+        if (!this.verifiedEndpoints.has(endpoint)) {
+          if (await endpoint.chainId() !== this.expectedChainId) continue;
+          this.verifiedEndpoints.add(endpoint);
+        }
+        const result = await operation(endpoint);
+        this.activeEndpointIndex = index;
+        return result;
+      } catch {
+        // Do not expose provider URLs or error bodies to the caller/logs.
+      }
+    }
+    throw new Error('All configured RPC endpoints failed or returned an unexpected chain ID');
+  }
+
+  public async chainId(): Promise<number> {
+    return this.withEndpoint(async () => this.expectedChainId);
+  }
+
+  public async latestBlock(): Promise<number> {
+    return this.withEndpoint((endpoint) => endpoint.latestBlock());
+  }
+
+  public async block(number: number): Promise<EvmBlock> {
+    return this.withEndpoint((endpoint) => endpoint.block(number));
+  }
+
+  public async logs(fromBlock: number, toBlock: number, addresses: readonly string[]): Promise<readonly EvmLog[]> {
+    return this.withEndpoint((endpoint) => endpoint.logs(fromBlock, toBlock, addresses));
+  }
+}
+
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const DATA = /^0x(?:[0-9a-fA-F]{2})*$/;

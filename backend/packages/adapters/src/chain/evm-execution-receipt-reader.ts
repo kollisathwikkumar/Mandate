@@ -1,4 +1,5 @@
-import { JsonRpcProvider, isAddress } from 'ethers';
+import { isAddress } from 'ethers';
+import { createEvmReadProvider } from './evm-read-provider.js';
 import type { JsonObject } from '../../../domain/src/json-value.js';
 import type { ExecutionReceiptObservation, ExecutionReceiptReader } from '../../../ports/src/execution-reconciliation.js';
 
@@ -16,12 +17,20 @@ function rpcUrl(chainId: number, urls: Readonly<Record<number, string>>): string
 
 /** Reads a receipt, its containing canonical block, and the chain head from the configured EVM RPC. */
 export class EvmExecutionReceiptReader implements ExecutionReceiptReader {
-  public constructor(private readonly urls: Readonly<Record<number, string>>) {}
+  public constructor(
+    private readonly urls: Readonly<Record<number, string>>,
+    private readonly fallbackUrls: Readonly<Record<number, readonly string[]>> = {},
+  ) {}
+
+  private async provider(chainId: number) {
+    const primary = rpcUrl(chainId, this.urls);
+    return createEvmReadProvider(chainId, [primary, ...(this.fallbackUrls[chainId] ?? [])]);
+  }
 
   public async observe(input: { readonly chainId: number; readonly transactionHash: string; readonly requiredConfirmations: number }): Promise<ExecutionReceiptObservation | null> {
     if (!Number.isSafeInteger(input.chainId) || input.chainId < 1 || !Number.isSafeInteger(input.requiredConfirmations)
       || input.requiredConfirmations < 1 || !/^0x[0-9a-fA-F]{64}$/.test(input.transactionHash)) throw new Error('INVALID_INPUT');
-    const provider = new JsonRpcProvider(rpcUrl(input.chainId, this.urls), input.chainId, { staticNetwork: true });
+    const provider = await this.provider(input.chainId);
     try {
       const network = await provider.getNetwork();
       if (network.chainId !== BigInt(input.chainId)) throw new Error('CHAIN_MISMATCH');
@@ -64,7 +73,7 @@ export class EvmExecutionReceiptReader implements ExecutionReceiptReader {
   }): Promise<{ readonly senderNonce: number; readonly timestampSeconds: number }> {
     if (!Number.isSafeInteger(input.chainId) || input.chainId < 1 || !Number.isSafeInteger(input.blockNumber) || input.blockNumber < 0
       || !isAddress(input.sender) || !/^0x[0-9a-f]{64}$/.test(input.blockHash)) throw new Error('INVALID_INPUT');
-    const provider = new JsonRpcProvider(rpcUrl(input.chainId, this.urls), input.chainId, { staticNetwork: true });
+    const provider = await this.provider(input.chainId);
     try {
       const network = await provider.getNetwork();
       if (network.chainId !== BigInt(input.chainId)) throw new Error('CHAIN_MISMATCH');
@@ -87,7 +96,7 @@ export class EvmExecutionReceiptReader implements ExecutionReceiptReader {
     if (!Number.isSafeInteger(input.chainId) || input.chainId < 1 || !Number.isSafeInteger(input.blockNumber) || input.blockNumber < 0) {
       throw new Error('INVALID_INPUT');
     }
-    const provider = new JsonRpcProvider(rpcUrl(input.chainId, this.urls), input.chainId, { staticNetwork: true });
+    const provider = await this.provider(input.chainId);
     try {
       const network = await provider.getNetwork();
       if (network.chainId !== BigInt(input.chainId)) throw new Error('CHAIN_MISMATCH');

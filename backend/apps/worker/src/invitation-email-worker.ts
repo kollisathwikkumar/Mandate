@@ -87,6 +87,7 @@ function invitationLink(baseUrl: string, token: string): string {
 }
 
 function buildMessage(config: InvitationEmailWorkerConfig, invitation: ClaimedInvitationEmail, token: string): InvitationEmailMessage {
+  // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
   const organizationName = invitation.organization_name.replace(/[\r\n\u0000-\u001f\u007f]/g, ' ').slice(0, 160);
   return {
     from: config.from,

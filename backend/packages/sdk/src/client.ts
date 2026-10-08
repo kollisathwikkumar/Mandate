@@ -174,6 +174,7 @@ export class MandateClient {
 
   public async createOrganization(displayName: string, idempotencyKey: string): Promise<JsonValue> {
     this.requireHuman();
+    // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
     const body = z.object({ displayName: z.string().trim().min(1).max(160).refine((value) => !/[\u0000-\u001f\u007f]/.test(value)) }).strict().parse({ displayName });
     return this.postJson('/api/v1/orgs', body, idempotencyKey);
   }
@@ -308,6 +309,7 @@ export class MandateClient {
     this.requireHuman();
     const body = z.object({
       disposition: z.enum(['CONSUMED', 'RELEASED']),
+      // oxlint-disable-next-line no-control-regex -- Control-character rejection is intentional.
       reason: z.string().trim().min(1).max(1000).refine((value) => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)),
       evidenceHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).transform((value) => value.toLowerCase()).optional(),
     }).strict().parse({ disposition, reason, ...(evidenceHash === undefined ? {} : { evidenceHash }) });

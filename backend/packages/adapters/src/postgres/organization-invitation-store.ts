@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import type { OrganizationRole } from '../../../domain/src/principal.js';
 import { RepositoryAccessError } from '../../../ports/src/repository-errors.js';

@@ -1,0 +1,30 @@
+import { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
+vi.mock('../src/auth/AuthProvider', () => ({ useAuth: () => ({ accessToken: 'session', user: { access_token: 'session', profile: {} }, loading: false }) }));
+vi.mock('../src/app/VisualStage', () => ({ VisualStage: () => null }));
+import { App } from '../src/app/App';
+const host = document.createElement('div');
+const root = createRoot(host);
+afterEach(() => { act(() => root.unmount()); host.remove(); localStorage.clear(); vi.unstubAllGlobals(); });
+it('switches shell and page requests together and closes old-tenant forms', async () => {
+  vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
+  document.body.append(host);
+  (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+  localStorage.setItem('mandate.organizationId', 'tenant-a');
+  window.history.replaceState({}, '', '/app/agents');
+  const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input);
+    const body = path === '/api/v1/me' ? { principal: { type: 'HUMAN', subject: 'tester' }, organizations: [{ organizationId: 'tenant-a', role: 'OWNER' }, { organizationId: 'tenant-b', role: 'OWNER' }] } : path === '/health/ready' ? { status: 'ready' } : { agents: [] };
+    return new Response(JSON.stringify(body), { status: 200 });
+  });
+  vi.stubGlobal('fetch', fetcher);
+  await act(async () => { root.render(<MemoryRouter initialEntries={['/app/agents']}><App /></MemoryRouter>); });
+  await act(async () => { Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.includes('Register agent'))?.click(); });
+  expect(host.querySelector('[role="dialog"]')).not.toBeNull();
+  await act(async () => { host.querySelector<HTMLButtonElement>('[aria-label^="Switch organization"]')?.click(); });
+  await act(async () => { Array.from(host.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')).find((button) => button.textContent?.includes('tenant-b'))?.click(); });
+  expect(fetcher.mock.calls.some(([path]) => String(path) === '/api/v1/orgs/tenant-b/agents')).toBe(true);
+  expect(host.querySelector('[role="dialog"]')).toBeNull();
+});

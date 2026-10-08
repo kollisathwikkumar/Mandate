@@ -5,12 +5,6 @@ import { EvmSafePolicyActivationReader } from './evm-safe-policy-activation-read
 
 const safeInterface = new Interface(['event ExecutionSuccess(bytes32 indexed txHash,uint256 payment)']);
 const safeEventTopic = safeInterface.getEvent('ExecutionSuccess')?.topicHash;
-const guardAbi = [
-  'function policyEpoch() view returns (uint64)',
-  'function policyEnabled() view returns (bool)',
-  'function policyRevisionHash() view returns (bytes32)',
-];
-const moduleAbi = ['function agents(address agent) view returns (uint64 version,bool active)'];
 const hashSchema = /^0x[0-9a-fA-F]{64}$/;
 
 function rpcUrl(chainId: number, rpcUrls: Readonly<Record<number, string>>): string {

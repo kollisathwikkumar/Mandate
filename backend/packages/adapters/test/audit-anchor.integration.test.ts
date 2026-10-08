@@ -60,8 +60,10 @@ describe.skipIf(connectionString === undefined)('Audit anchor/PostgreSQL integra
 
     const repository = new AuditAnchorStore(pool);
     const scopedRepository: AuditAnchorRepository = {
-      async getCandidateOrganizationIds(limit) {
-        return (await repository.getCandidateOrganizationIds(limit)).filter((candidate) => candidate === organizationId);
+      async getCandidateOrganizationIds(_limit) {
+        // Keep this concurrency test independent of unrelated organizations and
+        // the global candidate batch limit in a database reused across runs.
+        return [organizationId];
       },
       anchorLatest: (id, createCheckpoint) => repository.anchorLatest(id, createCheckpoint),
     };
@@ -94,7 +96,7 @@ describe.skipIf(connectionString === undefined)('Audit anchor/PostgreSQL integra
     expect(allAnchors.rows).toHaveLength(2);
     expect(allAnchors.rows[1]?.event_hash.trim()).toBe(thirdHash);
     expect(allAnchors.rows[1]?.previous_checkpoint_hash).toBe(firstAnchor.rows[0]?.checkpoint_hash);
-    await expect(repository.getCandidateOrganizationIds(25)).resolves.not.toContain(organizationId);
+    await expect(repository.getCandidateOrganizationIds(500)).resolves.not.toContain(organizationId);
   });
 
   it('rejects edits and deletions of checkpoint metadata in PostgreSQL', async () => {
